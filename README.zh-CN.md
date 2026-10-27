@@ -43,7 +43,8 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 先把源码放到运行游戏的机器上——克隆仓库或解压发行包——然后：
 
 ```bash
-cd /path/to/mv-ai-bridge   # 克隆或解压得到的目录
+git clone https://github.com/K-ame/mv-ai-bridge.git
+cd mv-ai-bridge
 npm install
 npm run build
 

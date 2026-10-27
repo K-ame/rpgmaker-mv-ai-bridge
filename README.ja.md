@@ -47,7 +47,8 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 まずゲームを動かすマシンにソースを用意します——リポジトリを clone するか、リリースアーカイブを展開してください——その後:
 
 ```bash
-cd /path/to/mv-ai-bridge   # clone または展開したフォルダ
+git clone https://github.com/K-ame/mv-ai-bridge.git
+cd mv-ai-bridge
 npm install
 npm run build
 
