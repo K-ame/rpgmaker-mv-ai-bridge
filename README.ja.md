@@ -1,5 +1,12 @@
 # RPG Maker MV AI Bridge
 
+<p align="center">
+  <a href="https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases"><img src="https://img.shields.io/github/v/release/K-ame/rpgmaker-mv-ai-bridge?color=2ea44f" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/K-ame/rpgmaker-mv-ai-bridge" alt="License"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-339933" alt="Node 20+">
+  <img src="https://img.shields.io/badge/protocol-MCP-6E56CF" alt="Model Context Protocol">
+</p>
+
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
 AI エージェントがネイティブな [Model Context Protocol](https://modelcontextprotocol.io) 経由で
