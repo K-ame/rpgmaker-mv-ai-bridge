@@ -40,7 +40,11 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 
 ## 安装
 
-先把源码放到运行游戏的机器上——克隆仓库或解压发行包——然后：
+**直接用打包好的（不用构建）：** 到 [Releases](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) 下载
+`rpgmaker-mv-ai-bridge-v0.1.0.zip`，里面有插件、打成一个文件的桥接程序、`install.bat` / `install.sh` 和 `serve.bat`。
+只需要装 Node.js 20 以上。
+
+或者从源码构建：
 
 ```bash
 git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git

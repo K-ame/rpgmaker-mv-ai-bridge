@@ -41,7 +41,11 @@ The bridge binds to loopback by default and requires a bearer token.
 
 ## Install
 
-Get the source onto the machine that runs the game — clone the repository or unpack the release archive — then:
+**Prebuilt (no build step):** grab `rpgmaker-mv-ai-bridge-v0.1.0.zip` from
+[Releases](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) — it holds the plugin, the bridge bundled into a
+single file, `install.bat` / `install.sh` and `serve.bat`. Node.js 20+ is the only requirement.
+
+Or build from source:
 
 ```bash
 git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
