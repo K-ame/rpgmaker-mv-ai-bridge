@@ -44,8 +44,8 @@ The bridge binds to loopback by default and requires a bearer token.
 Get the source onto the machine that runs the game — clone the repository or unpack the release archive — then:
 
 ```bash
-git clone https://github.com/K-ame/mv-ai-bridge.git
-cd mv-ai-bridge
+git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
+cd rpgmaker-mv-ai-bridge
 npm install
 npm run build
 

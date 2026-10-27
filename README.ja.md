@@ -47,8 +47,8 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 まずゲームを動かすマシンにソースを用意します——リポジトリを clone するか、リリースアーカイブを展開してください——その後:
 
 ```bash
-git clone https://github.com/K-ame/mv-ai-bridge.git
-cd mv-ai-bridge
+git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
+cd rpgmaker-mv-ai-bridge
 npm install
 npm run build
 
