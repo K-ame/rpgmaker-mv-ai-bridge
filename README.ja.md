@@ -89,7 +89,7 @@ MCP クライアントから子プロセスとして起動する場合:
   "mcpServers": {
     "mv-ai-bridge": {
       "command": "node",
-      "args": ["C:/path/to/mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
+      "args": ["C:/path/to/rpgmaker-mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
     }
   }
 }
@@ -303,8 +303,8 @@ node test/live.js observe '{}'   # 実行中のブリッジへ 1 回だけ呼び
 `test/live.js` は `~/.mv-ai-bridge/session.json` を読み、ツールを 1 つ呼び出します。
 手動用のツールであり、`npm test` には含まれません。
 
-RPG Maker MV 1.6.1 で 2 つのプロジェクトを実機確認済みです。127 個の独自プラグイン（ブリッジは 128 個目。
-独自のメッセージ・戦闘・メニューシステム）を導入した日本語の商用ゲームと、中国語の同人ゲームです。
+RPG Maker MV 1.6.1 で 2 つのプロジェクトを実機確認済みです。127 個の独自プラグインファイルを持ち、ブリッジは `plugins.js` の末尾に登録
+（独自のメッセージ・戦闘・メニューシステム）した日本語の商用ゲームと、中国語の同人ゲームです。
 実機ではマップ移動と経路探索、会話と選択肢、メニュー、イベントログを操作しました。
 戦闘ツールは `npm test` のモックゲームでプロトコルを検証したのみで、実機の戦闘は未検証です
 （プロトコル検証済み・実機検証待ち）。

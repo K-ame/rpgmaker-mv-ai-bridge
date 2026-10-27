@@ -81,7 +81,7 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
   "mcpServers": {
     "mv-ai-bridge": {
       "command": "node",
-      "args": ["C:/path/to/mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
+      "args": ["C:/path/to/rpgmaker-mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
     }
   }
 }
@@ -284,7 +284,7 @@ node test/live.js observe '{}'   # 对运行中的桥接发起一次调用
 
 `test/live.js` 读取 `~/.mv-ai-bridge/session.json` 并调用单个工具；它是手动工具，不包含在 `npm test` 中。
 
-已在 RPG Maker MV 1.6.1 上实测两个工程：一个安装 127 个自有插件（桥接插件为第 128 个，含自定义消息、战斗与
+已在 RPG Maker MV 1.6.1 上实测两个工程：一个自带 127 个插件文件、桥接注册在 `plugins.js` 末尾（含自定义消息、战斗与
 菜单系统）的日文商业游戏，和一个中文同人游戏。实机覆盖地图移动与寻路、对话与选项、菜单、事件日志。
 战斗工具目前只在 `npm test` 的模拟游戏中验证过协议，实机战斗尚未验证——请把它当作「协议已测、实机待测」。
 `npm test` 用模拟游戏覆盖桥接协议。

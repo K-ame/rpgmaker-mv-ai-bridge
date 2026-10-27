@@ -83,7 +83,7 @@ clean. To let an MCP client launch the bridge as a child process:
   "mcpServers": {
     "mv-ai-bridge": {
       "command": "node",
-      "args": ["C:/path/to/mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
+      "args": ["C:/path/to/rpgmaker-mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
     }
   }
 }
@@ -303,8 +303,8 @@ node test/live.js observe '{}'   # one-shot call against a running bridge
 
 `test/live.js` reads `~/.mv-ai-bridge/session.json` and calls a single tool; it is a manual tool, not part of `npm test`.
 
-Tested against RPG Maker MV 1.6.1 on two projects: a commercial Japanese title with 127 own plugins (the bridge is
-the 128th; custom message, battle and menu systems) and a Chinese fan game. Live sessions covered map movement and
+Tested against RPG Maker MV 1.6.1 on two projects: a commercial Japanese title with 127 plugin files of its own, with the bridge
+registered last in `plugins.js` (custom message, battle and menu systems), and a Chinese fan game. Live sessions covered map movement and
 pathfinding, dialogue and choices, menus, and the event log. The battle tools have only been exercised against the
 mock game in `npm test`; a live battle is still pending, so treat battle support as protocol-tested, not play-tested.
 `npm test` covers the bridge protocol against a mock game.
