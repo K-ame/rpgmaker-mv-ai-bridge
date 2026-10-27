@@ -1,0 +1,43 @@
+{
+  "name": "mv-ai-bridge",
+  "version": "0.1.0",
+  "description": "Let AI agents play RPG Maker MV games through native MCP.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mv-ai-bridge": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "plugin",
+    "README.md",
+    "README.zh-CN.md",
+    "README.ja.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli/index.js serve",
+    "dev": "tsc -p tsconfig.json && node dist/cli/index.js serve",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "rpg-maker-mv",
+    "mcp",
+    "agent",
+    "game-automation"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2"
+  }
+}

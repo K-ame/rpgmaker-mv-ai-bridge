@@ -1,0 +1,303 @@
+# RPG Maker MV AI Bridge
+
+[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
+
+让 AI 代理通过原生 [Model Context Protocol](https://modelcontextprotocol.io) 游玩 RPG Maker MV 游戏。
+游戏通过本地 WebSocket 暴露结构化状态和玩家级输入，桥接层将其转换为 MCP 工具。
+没有截图、没有视觉模型：代理看到的是地块、事件、对话和战斗状态的数据。
+
+- **只做游玩。** 桥接层读取状态、按按钮，不修改数据库、不传送玩家。少数便利功能（`manage.formation`、
+  `manage.use_item`、`checkpoint.load`）直接调用运行时 API，因而会绕过插件层的副作用；每个这样的工具描述里都标了
+  `bypasses:`。
+- **原生 MCP。** 支持 stdio 和 Streamable HTTP，不绑定任何特定代理框架。
+- **为长会话设计。** 复合动作在下一个决策点停下，检查点可重试某个房间，笔记能跨越上下文重置。
+
+## 工作原理
+
+```
+MCP 客户端（代理）
+      │  stdio 或 Streamable HTTP（Bearer Token）
+      ▼
+mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js（游戏内）
+                                                              │
+                                                        RPG Maker MV 运行时
+```
+
+一个进程同时提供两端：
+
+- `ws://<host>:<port>/game` 供游戏插件连接（由游戏主动拨出）。
+- `http://<host>:<port>/mcp` 供 MCP 客户端连接（Streamable HTTP，JSON 响应）。
+- `http://<host>:<port>/health` 用于快速检查状态。由于它会返回游戏标题和最近一次观测到的游戏状态（而不只是布尔值），
+  同样需要 Token。
+
+桥接默认只监听回环地址，并要求 Bearer Token。
+
+## 环境要求
+
+- Node.js 20 或更高版本。
+- PC 版（NW.js）RPG Maker MV 游戏，MV 1.5+ / 1.6.x。RPG Maker MZ 运行时不同，不支持。
+- Windows、macOS 或 Linux，游戏与桥接器运行在同一台机器上。
+
+## 安装
+
+先把源码放到运行游戏的机器上——克隆仓库或解压发行包——然后：
+
+```bash
+cd /path/to/mv-ai-bridge   # 克隆或解压得到的目录
+npm install
+npm run build
+
+# 把插件复制进游戏并注册到 plugins.js
+node dist/cli/index.js install "/path/to/MyGame"
+```
+
+`install` 会写入 `www/js/plugins/MV_AI_Bridge.js`，把条目追加到 `www/js/plugins.js` 末尾（保证插件包裹其他
+所有插件的行为），并留下一次性备份 `plugins.js.mv-ai-bridge.bak`。如果 `plugins.js` 不是纯 JSON，会打印
+手动添加的片段。卸载方法见 [卸载](#卸载)。
+
+运行 `node dist/cli/index.js doctor "/path/to/MyGame"` 可检查 Node 版本、工程结构、插件位置、Token 和会话状态。
+
+## 运行
+
+```bash
+node dist/cli/index.js serve            # HTTP MCP + 游戏 WebSocket
+node dist/cli/index.js serve --stdio    # 同时通过 stdin/stdout 提供 MCP
+node dist/cli/index.js serve --no-stdio # 仅 HTTP
+```
+
+默认地址为 `127.0.0.1:7321`。桥接会把当前 Token 和 URL 写入 `~/.mv-ai-bridge/session.json`；
+`node dist/cli/index.js session` 可打印该文件。然后启动游戏，插件每隔几秒重连一次。
+
+stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断，因此后台或管道运行不会污染 stdout。
+要让 MCP 客户端把桥接作为子进程拉起：
+
+```json
+{
+  "mcpServers": {
+    "mv-ai-bridge": {
+      "command": "node",
+      "args": ["C:/path/to/mv-ai-bridge/dist/cli/index.js", "serve", "--stdio"]
+    }
+  }
+}
+```
+
+也可以通过 HTTP 连接。Token 位于 `~/.mv-ai-bridge/token`：
+
+```json
+{
+  "mcpServers": {
+    "mv-ai-bridge": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:7321/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+## 文件
+
+| 路径 | 用途 |
+| --- | --- |
+| `~/.mv-ai-bridge/token` | `/mcp` 与 `/health` 的 Bearer Token，首次运行时创建。 |
+| `~/.mv-ai-bridge/session.json` | 运行中的桥接地址、pid 和版本。 |
+| `~/.mv-ai-bridge/notes.json` | 代理持久笔记，按游戏标题分组。 |
+
+设置 `MV_AI_BRIDGE_HOME` 可改变该目录。
+
+## 工具
+
+每次调用返回同一个信封：
+
+```json
+{
+  "ok": true,
+  "status": "done",
+  "action": "walk",
+  "effect": { "steps_done": 3 },
+  "interrupted_by": null,
+  "reason": null,
+  "tick": 12345,
+  "state": { "scene": "map", "map": { "id": 100, "name": "洞窟３", "area": ["洞窟１", "洞窟２"] } },
+  "new_log": [],
+  "warnings": []
+}
+```
+
+`status` 取值：
+
+- `done` — 达成目标或动作自然结束。
+- `partial` — 预算耗尽或移动受阻，`effect` 表示实际完成到哪里。
+- `interrupted` — 被消息、选项、战斗、传送或场景切换打断，`interrupted_by` 标明原因。
+- `error` — 动作无法开始（`ok: false`）。
+
+`partial` 和 `interrupted` 是正常的游玩结果，不是工具故障。
+
+| 工具 | 作用 |
+| --- | --- |
+| `observe` | 场景、地图、玩家位置/朝向、当前消息、选项、队伍、战斗、附近事件。`objective` 原样带回 `note` 里 key 为 `objective` 的值，长流程用它记住当前目标。在地图上还会列出 `threats`（8 格内的战斗事件，含距离、是否移动、是否追击）、`balloons`（8 格内的任务标记：`!` / `?` 气泡，含距离、`balloon` 编号与来源贴图）和 `world_frozen`（`FreezeWhileThinking` 正在冻结地图时为 true）。战斗中的整个输入阶段都会给出 `party_commands`、`actor_commands`、正在选择的角色、技能类型与全部技能（含 MP/TP 消耗和可用性）、战斗道具，以及 `enemy_targets` / `actor_targets`（索引即 `target_index`），不再只报当前聚焦的那个窗口。在菜单、商店等非地图场景中，列出每个可见窗口的光标、条目与商店价格；存档界面额外给每个槽位的 `exists` / `timestamp` / `playtime`。 |
+| `look` | 本地地图字符图（`@` 你、`E` 事件、`.` 可走、`#` 挡路），带地图坐标 `origin` 和事件列表。`detail: "full"` 改为返回每格通行性。越界格已裁掉，超过地图的半径会裁到边界并回报实际 `radius`；`overview: true` 一次返回整张地图。非地图场景返回 `bad_scene` 并带当前场景名。 |
+| `list_events` | 附近事件的名字、距离、触发方式、`interact_from`（`adjacent` / `here`）、`action_trigger`、`commands` / `empty`（当前激活页没有指令，按确定键不会有反应）、`hazard`（当前激活页会开战，直接或经公共事件调用）和 `chases`（移动路线会追玩家）。另有 `balloon`（头顶任务标记：1 `!`、2 `?`、0 无，按叠加贴图或当前 balloon 识别）、`page`（激活页序号与总页数）、`note`（事件备注）及 `page_note`（激活页的注释指令，note 型插件的标签常放这里），后两者只在有内容时出现。 |
+| `walk` | 沿一个方向最多走 N 格。没走满（撞墙或中途被挡）返回 `partial`。`interrupted_by` 区分 `message`（先 advance）、`choice`（先 select）、`event`、`transfer` 和场景名。`avoid_hazard: N` 会在踏进战斗事件 N 格范围前停下。非地图场景（菜单、存档等）返回 `bad_scene` 并带当前场景名。 |
+| `go_to` | A* 寻路到指定地块。失败时返回 `nearest_reachable` 和 `blocked_by`（`wall`、`event`、`one_way_tile`、`avoidance_zone` 等）。`avoid_hazard: N` 会绕开战斗事件，下一步靠近时停下。非地图场景返回 `bad_scene`。 |
+| `talk_to` | 用确定键触发地图事件：从相邻格面向它，对 `interact_from: "here"` 的事件先走到它格子上再按；柜台后的 NPC（`interact_from: "across_counter"`）会站到柜台前、面向柜台再按。错误会区分不可达、非确定键页面和空占位页；非地图场景返回 `bad_scene`。 |
+| `interact` | 按一次确定键。 |
+| `advance` | 快进打字、翻页，遇到选项或事件结束时停下。`page_delay_ms` 只作用于消息窗口，战斗日志按游戏自身节奏播放。战斗里**绝不出招**：指令/目标窗口打开时返回 `needs_command`；`battleEnd` 阶段按确定键推进胜利/经验窗口直到回到地图（`stop: "battle_end"`）。 |
+| `select` | 按序号或文本选择选项：消息选项、事件弹出的 Select Item 窗口，或当前激活的菜单/商店/战斗窗口（索引与 `observe.ui` 一致）。菜单场景仍在打开时会自动等待；存档界面必须先用 `select` 聚焦槽位，直接 `input ok` 会被拒绝。 |
+| `back` | 取消键（关闭菜单、返回上一层）。 |
+| `battle` | 驱动战斗界面：`auto` 把整场战斗交给引擎自动战斗（放弃战术控制）；给出指令选择参数时，只为当前输入角色发一条指令。`busy` 时会带 `effect.active_action` 与战斗窗口状态。 |
+| `manage` | 战斗外的队伍控制：roster 查看装备/技能/道具，equip 换装，formation 调整站位，use_item 使用道具。 |
+| `title` | 标题界面：新游戏、读取最近存档、设置、返回。参数名为 `action`。 |
+| `wait` | 等待 settled / message / choice / battle / 场景切换 / 指定毫秒。 |
+| `checkpoint` | 保存、读取、列出、删除内存快照。绝不触碰磁盘存档。 |
+| `input` | 原始引擎按键（`button`、`hold_ms`），可精确控制按住时长。返回 `effect.effective` 说明这次按键是否真的产生了变化；菜单被消息/事件挡住或场景禁用时返回 `reason: "input_swallowed"` 与 `blocked_by`。存档界面未选槽时按 `ok` 返回 `save_slot_not_chosen`。 |
+| `log` | 轮询事件日志：消息、选项、传送、场景切换、战斗开始/结束，以及队员与敌人的状态和装备变化。台词中出现「〜が必要」「〜しなければ」「〜すると良い」这类要求时会额外记一条 `hint`。 |
+| `note` | 桥接机器上的持久笔记，按游戏标题分组。`key: "objective"` 的值会出现在每次 `observe` 的 `objective` 字段里。例：`{"action":"set","key":"objective","text":"凑够 2000G 登记公会；出城前先买武器"}`。 |
+
+### 错误原因
+
+动作无法开始时，`ok` 为 `false`，`reason` 通常是下列之一：
+
+| `reason` | 含义 |
+| --- | --- |
+| `bad_scene` | 该动作只在地图（或其他特定场景）可用，当前场景不同。`effect.scene` 给出场景名。 |
+| `not_on_map` | 场景看起来是地图，但读不到可用的地图数据，通常是 `Map###.json` 缺失或不完整。 |
+| `needs_command` | 战斗中指令或目标窗口正在等待时调用了 `advance`；先发一条 `battle` 指令。 |
+| `save_slot_not_chosen` | 存档界面还没用 `select` 聚焦槽位就按了 `ok`。 |
+| `input_swallowed` | 此刻按键无法生效，`blocked_by` 说明是什么占着画面（消息、事件、被禁用的窗口）。 |
+
+其他 reason（`blocked`、`threat_nearby`、`busy`、`unreachable` 等）是动作特有的结果，会在对应动作的说明里列出。
+
+### 推断字段
+
+有两个字段是启发式推断，不是引擎直接给出的数据：
+
+- `balloon`（`list_events`）与 `balloons`（`observe`）——RPG Maker 没有「任务标记」字段。桥接在事件页叠加贴图名匹配
+  `bikkuri`（`!`）或 `hatena` / `question`（`?`），或事件上正有 balloon 播放时上报标记。用其他名字的贴图、图片，
+  或已经播完的气泡绘制的标记会漏检。
+- `hint`（`log`）——台词命中少量「要求 / 线索」句式时追加。换种说法的线索可能漏报，普通台词也可能误报。
+
+信封里其余字段都直接读自运行时对象。
+
+### 阅读节奏
+
+`advance` 会让每页对话在屏幕上停留 `page_delay_ms` 再翻页，方便观看。
+默认值来自插件参数 `ReadDelay`（2000 ms）。传 `page_delay_ms: 0` 可全速跳过。
+这个延迟只作用于消息窗口；战斗日志一行一行的节奏由游戏自己控制，不受该参数影响。
+
+### 思考时冻结世界
+
+把插件参数 `FreezeWhileThinking` 设为 `true`（默认 `false`；编辑 `plugins.js` 里的条目，或重新安装后修改），
+地图在游戏稳定、没有桥接动作运行时会暂停更新。画面继续渲染；桥接动作（移动、菜单）执行时会解除冻结。
+只有世界模拟（事件移动、并行事件）停下，此时 `observe` 会返回 `state.world_frozen: true`。
+
+消息、选项、战斗或传送进行中不会冻结，对话和战斗动画照常播放。它能减少但不能替代 `avoid_hazard`：
+已经贴到相邻格的怪，在代理行动时仍会开战。
+
+### 日志文件
+
+NW.js 没有面向玩家的控制台，插件参数 `Debug` 在实际游玩里往往看不到输出。把 `LogFile` 设为路径
+（例如 `www/mv-ai-bridge.log`，相对路径按游戏工作目录解析）即可把同样的诊断写入文件：连接、每条命令与参数、
+任务结束状态和错误。设为 `true` 等价于 `www/mv-ai-bridge.log`。文件只追加，不会自动轮换。
+
+### 地图上的怪物
+
+许多 MV 游戏把大地图怪物实现为普通事件：事件页里直接放“战斗处理”，或通过公共事件间接开战。
+`list_events` 会为这类事件返回 `hazard: true`，并且只检查当前激活的事件页；移动路线会追玩家时返回 `chases: true`。
+`observe` 还会在地图上给出 `threats`（8 格内的战斗事件），第一次感知就能决定是打还是绕。
+
+`walk` 和 `go_to` 支持 `avoid_hazard: N`：路径会与战斗事件保持 N 格距离，移动中若下一步会靠近，则以
+`status: "partial"`、`reason: "threat_nearby"` 停下。这只是尽力而为：追击范围不小于安全距离的怪，
+仍会追上站着不动的玩家。它用于减少误踩战斗，不保证一定躲开。
+
+### 战斗战术
+
+桥接层不做战术判断，只把全部选项暴露出来，并执行代理选中的那一个。`battle auto` 是例外：
+它把整场战斗交给引擎的自动战斗，适合杂兵战。
+
+- 战斗中 `observe` 会返回 `state.battle.commands`（角色指令窗口：攻击、每个技能类型一项、防御、道具）、
+  `state.battle.actor`（当前选择者）、`skill_types`（每个技能及其 `mp_cost` / `tp_cost` / `usable`）、
+  战斗 `items` 和 `targets`。
+- `battle` 传入 `command_index`（或 `action` + `skill_type_index`）、`skill_index`、`item_index`、`target_index`
+  时，只为当前输入角色发一条指令，游戏提交后立即返回。之后再次 `observe` 指示下一位角色。
+- 消耗由游戏自身的技能插件定义，因此读取的是 `skillMpCost` / `skillTpCost`，而不是 `Skills.json` 里常被覆盖或缺失的 `mp`。
+- 感知不止 HP：`observe` 会为每名队员、每个敌人以及两个目标窗口列出 `states`；事件日志在状态增减或装备槽变化时写入
+  `actor_state` / `actor_equip`，敌人的状态增删同样以 `enemy_state` 写入。以状态或卸装实现的爆衣等效果，
+  即使只持续一回合也能被看到。
+
+### 队伍管理
+
+`manage` 负责战斗外的装备、站位和道具：
+
+- `roster`（只读）— 队伍顺序、等级、HP/MP/TP、状态、各槽位装备、已学技能和道具；`detail: "full"` 还会列出
+  每个槽位可装备的道具。
+- `equip` — 用 `actor_id` + `slot` + `item_id` 更换一个槽位（`item_id: 0` 卸下）。
+- `formation` — 用 `swap: [i, j]` 交换两名队员的位置。这里直接调用运行时队伍顺序 API
+  （`bypasses:` 换人插件在菜单中收取的费用或限制）。
+- `use_item` — 通过引擎的动作系统使用道具，而不是在道具菜单里选择
+  （`bypasses:` 挂钩菜单选择、添加确认框或额外目标规则的插件；使用者是可行动成员中 pha 最高者）。
+
+除 `roster` 外，其余操作都要求地图处于稳定状态：没有消息、选项、事件或传送在运行。
+
+### 菜单与商店
+
+菜单和商店用 `input`、`back` 与 `observe` 驱动。在地图和战斗之外，`observe` 会多出一个 `ui` 块，列出每个可见窗口的
+类名、`active` 标记、光标位置以及窗口自身持有的条目——菜单指令、带数量的道具列表、带价格的商店商品。
+桥接不为各个菜单插件建模，而是读取游戏自己构造的窗口对象，因此原版菜单和大幅重做的菜单对代理呈现一致。
+用 `input` `menu` 打开菜单，方向键移动，`ok` 确认，`back` 返回。
+
+### 检查点
+
+`checkpoint save` 用 `JsonEx` 序列化整个运行时状态并保存在内存中，`checkpoint load` 恢复并回到地图场景。
+读取时整体替换运行时状态，因此玩家从菜单读档时才会运行的插件逻辑会被绕过。
+它适合重试某个房间或选择，但不是存档槽：随游戏进程消失，也不会出现在游戏的读档菜单里。
+
+## 卸载
+
+1. 删除 `www/js/plugins/MV_AI_Bridge.js`。
+2. 从 `www/js/plugins.js` 中删除 `MV_AI_Bridge` 条目，或用 `www/js/plugins.js.mv-ai-bridge.bak` 覆盖还原。
+3. 如需清除 Token、会话文件和笔记，再删除 `~/.mv-ai-bridge/`。
+
+Steam 的“验证游戏文件完整性”可能还原 `plugins.js`，效果上也会移除该条目。安装前请确认游戏许可条款：
+部分商业游戏不允许修改其文件。
+
+## 安全
+
+- 除非传入 `--host`，桥接只监听 `127.0.0.1`。不要把它暴露到不受控制的网络。
+- `/mcp` 与 `/health` 需要 `~/.mv-ai-bridge/token` 中的 Bearer Token。删除该文件即可轮换。
+- 游戏插件向外连接桥接，游戏侧不开放入站端口。
+- 同一时刻只允许一个写操作，代理无法交错执行两套移动流程。
+
+## 开发
+
+```bash
+npm run build
+npm test                 # 随机端口上的模拟游戏，无需真实游戏
+node test/live.js observe '{}'   # 对运行中的桥接发起一次调用
+```
+
+`test/live.js` 读取 `~/.mv-ai-bridge/session.json` 并调用单个工具；它是手动工具，不包含在 `npm test` 中。
+
+已在 RPG Maker MV 1.6.1 上实测两个工程：一个安装 127 个自有插件（桥接插件为第 128 个，含自定义消息、战斗与
+菜单系统）的日文商业游戏，和一个中文同人游戏。实机覆盖地图移动与寻路、对话与选项、菜单、事件日志。
+战斗工具目前只在 `npm test` 的模拟游戏中验证过协议，实机战斗尚未验证——请把它当作「协议已测、实机待测」。
+`npm test` 用模拟游戏覆盖桥接协议。
+
+## 已知限制
+
+- **整体替换而非包裹的插件。** 插件必须最后加载。它通过写入 `Input._currentState` 虚拟化输入，并挂钩
+  `SceneManager.updateMain` / `SceneManager.updateScene`；如果其他插件整体替换这些符号而不调用原实现，
+  移动或冻结可能失效。
+- **工程结构。** `install` 要求 `www/js/plugins.js` 加 `www/js/plugins/`。运行时位于根目录（`Game.exe` 旁直接
+  是 `js/`、`data/`）或经过 Enigma 等加密打包的游戏，需要手动复制插件并手动添加 `plugins.js` 条目。
+- **一个桥接只服务一个游戏。** 同一进程同时只连接一个游戏。要并行驱动第二个游戏，需用另一个 `--port` 安装它，
+  并在该端口启动第二个桥接。
+- **仅限 PC。** 支持 NW.js 桌面版。移动端、Cordova 和浏览器部署不支持。
+- **绕过窗口层的战斗插件。** 战斗工具驱动原版指令窗口。自带输入流程的战斗插件会让这些工具降级，
+  对未建模的画面请改用 `input`。
+- **检查点只在内存中。** 它活在运行中的进程里，不会出现在读档菜单，游戏关闭即消失。
+
+## 许可证
+
+MIT。见 [LICENSE](LICENSE)。
