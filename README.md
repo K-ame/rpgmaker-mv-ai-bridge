@@ -1,4 +1,7 @@
-# RPG Maker MV AI Bridge
+<h1 align="center">RPG Maker MV AI Bridge</h1>
+
+<p align="center"><b>Let an AI agent play RPG Maker MV games.</b><br>
+It reads tiles, events, dialogue and battle state, and plays by pressing buttons — no screenshots, no vision model.</p>
 
 <p align="center">
   <a href="https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases"><img src="https://img.shields.io/github/v/release/K-ame/rpgmaker-mv-ai-bridge?color=2ea44f" alt="Latest release"></a>
@@ -9,9 +12,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-Let an AI agent play an RPG Maker MV game through native [Model Context Protocol](https://modelcontextprotocol.io).
-The game exposes structured state and player-level input over a local WebSocket; the bridge turns that into MCP tools.
-No screenshots, no computer-vision, no vision model: the agent sees tiles, events, dialogue and battle state as data.
+Two pieces: an in-game plugin that exposes state and accepts player-level input over a local WebSocket, and an MCP
+server that turns it into tools. Grab the [prebuilt zip](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) or
+[build from source](#install).
 
 - **Gameplay only.** The bridge reads state and presses buttons. It does not edit the database or teleport the player.
   A few conveniences (`manage.formation`, `manage.use_item`, `checkpoint.load`) call runtime APIs directly and

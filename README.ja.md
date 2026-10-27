@@ -1,4 +1,7 @@
-# RPG Maker MV AI Bridge
+<h1 align="center">RPG Maker MV AI Bridge</h1>
+
+<p align="center"><b>AI エージェントが RPG Maker MV を遊ぶ。</b><br>
+タイル、イベント、会話、戦闘状態を読み、ボタンを押して操作します。スクリーンショットも視覚モデルも不要です。</p>
 
 <p align="center">
   <a href="https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases"><img src="https://img.shields.io/github/v/release/K-ame/rpgmaker-mv-ai-bridge?color=2ea44f" alt="Latest release"></a>
@@ -9,12 +12,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-AI エージェントがネイティブな [Model Context Protocol](https://modelcontextprotocol.io) 経由で
-RPG Maker MV のゲームをプレイできるようにします。
-ゲームはローカル WebSocket 越しに構造化された状態とプレイヤー入力レベルの操作を公開し、
-ブリッジがそれを MCP ツールに変換します。
-スクリーンショットもコンピュータビジョンも画像認識モデルも不要で、エージェントはタイル、イベント、会話、
-戦闘状態をデータとして受け取ります。
+ゲーム内プラグイン（ローカル WebSocket で状態を公開し、プレイヤー入力を受け取る）と、それをツールに変換する
+MCP サーバーの 2 つでできています。[ビルド済み zip](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) か
+[ソースからビルド](#インストール)で導入できます。
 
 - **プレイのみ。** 状態を読み、ボタンを押すだけです。データベースの編集やプレイヤーのワープは行いません。
   一部の便利機能（`manage.formation`、`manage.use_item`、`checkpoint.load`）はランタイム API を直接呼ぶため、

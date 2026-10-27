@@ -1,4 +1,7 @@
-# RPG Maker MV AI Bridge
+<h1 align="center">RPG Maker MV AI Bridge</h1>
+
+<p align="center"><b>让 AI 代理来玩 RPG Maker MV。</b><br>
+读取地块、事件、对话和战斗状态，用「按键」的方式操作——没有截图，也不需要视觉模型。</p>
 
 <p align="center">
   <a href="https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases"><img src="https://img.shields.io/github/v/release/K-ame/rpgmaker-mv-ai-bridge?color=2ea44f" alt="Latest release"></a>
@@ -9,9 +12,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-让 AI 代理通过原生 [Model Context Protocol](https://modelcontextprotocol.io) 游玩 RPG Maker MV 游戏。
-游戏通过本地 WebSocket 暴露结构化状态和玩家级输入，桥接层将其转换为 MCP 工具。
-没有截图、没有视觉模型：代理看到的是地块、事件、对话和战斗状态的数据。
+两部分组成：一个游戏内插件，通过本地 WebSocket 暴露状态并接收玩家级输入；一个 MCP 服务器，把它变成工具。
+可以下[打包好的 zip](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases)，或者[从源码构建](#安装)。
 
 - **只做游玩。** 桥接层读取状态、按按钮，不修改数据库、不传送玩家。少数便利功能（`manage.formation`、
   `manage.use_item`、`checkpoint.load`）直接调用运行时 API，因而会绕过插件层的副作用；每个这样的工具描述里都标了
