@@ -345,7 +345,9 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'checkpoint',
     'Checkpoint',
     'Save, load, list or delete an in-memory snapshot of the whole game state. Checkpoints live inside the running game ' +
-      'process and never touch save slots on disk. "load" replaces the runtime state wholesale (bypasses: plugin logic ' +
+      'process and never touch save slots on disk. "save" only works on a settled map (no message, choice, event or ' +
+      'movement in progress); otherwise it returns not_settled with effect.blocked_by, or bad_scene outside the map. ' +
+      '"load" works from any scene and replaces the runtime state wholesale (bypasses: plugin logic ' +
       'that normally runs when the player loads from the menu). Save before a risky room, load to retry it. ' +
       ENVELOPE_NOTE,
     {

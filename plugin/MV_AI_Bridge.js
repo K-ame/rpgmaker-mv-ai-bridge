@@ -15,6 +15,12 @@
  * @desc Bridge port.
  * @default 7321
  *
+ * @param Token
+ * @desc Bridge token. Leave empty to read it from ~/.mv-ai-bridge (the
+ * running bridge writes it there). Only needed when that folder is not
+ * reachable from the game, e.g. a different user or MV_AI_BRIDGE_HOME.
+ * @default
+ *
  * @param Debug
  * @desc Log bridge activity to the console.
  * @default false
@@ -52,6 +58,7 @@
     var params = PluginManager.parameters(PLUGIN_NAME) || {};
     var HOST = String(params['Host'] || '127.0.0.1');
     var PORT = parseInt(params['Port'], 10) || 7321;
+    var TOKEN_PARAM = String(params['Token'] || '').trim();
     var DEBUG = String(params['Debug'] || 'false') === 'true';
     // NW.js has no visible console for players, so Debug can look like a
     // no-op. LogFile appends the same lines to a file instead (relative paths
@@ -3588,10 +3595,37 @@
         return JsonEx.stringify(contents);
     }
 
+    // Names the first thing that keeps isSettled() false, for error replies.
+    function unsettledBy() {
+        if (isMessageBusy()) return 'message';
+        if (choiceVisible()) return 'choice';
+        if (isEventRunning()) return 'event';
+        if (isTransferring()) return 'transfer';
+        if (isPlayerMoving()) return 'moving';
+        return 'busy';
+    }
+
     HANDLERS.checkpoint = function (job) {
         var action = String(job.args.action || 'save');
         var id = job.args.id ? String(job.args.id) : null;
         if (action === 'save') {
+            // The save contents keep the map interpreter's progress but not
+            // $gameMessage or the battle, so a snapshot taken during a message,
+            // event or battle would resume without the text that was on screen.
+            // Only a calm map gives a snapshot that restores cleanly.
+            if (sceneTag() !== 'map') {
+                finishJob(job, 'error', { action: 'save', scene: sceneTag() }, { reason: 'bad_scene' });
+                return;
+            }
+            if (!isSettled()) {
+                finishJob(job, 'error', {
+                    action: 'save',
+                    blocked_by: unsettledBy(),
+                    hint: 'Checkpoints can only be saved on a settled map. ' +
+                        'Call wait with until "settled", then retry.'
+                }, { reason: 'not_settled' });
+                return;
+            }
             // Mirrors DataManager.saveGameWithoutRescue so onAfterLoad has
             // valid BGM/BGS state to restore.
             if ($gameSystem.onBeforeSave) $gameSystem.onBeforeSave();
@@ -3627,6 +3661,11 @@
             }
             try {
                 var contents = JsonEx.parse(cp.data);
+                // Same order as DataManager.loadGameWithoutRescue. The save
+                // contents do not include $gameTemp, $gameMessage or $gameTroop,
+                // so rebuild the game objects first; otherwise a pending message,
+                // choice or reserved common event from before the load survives it.
+                DataManager.createGameObjects();
                 DataManager.extractSaveContents(contents);
                 if ($gameSystem.onAfterLoad) $gameSystem.onAfterLoad();
                 SceneManager.goto(Scene_Map);
@@ -3721,7 +3760,56 @@
     var reconnectDelay = 1000;
     var lastStateSent = 0;
 
+    // The bridge only accepts a game connection that presents its token.
+    // The running bridge writes the live token (which may come from --token)
+    // to session.json; the token file is the fallback. It is read on every
+    // connection attempt so a bridge started after the game is picked up.
+    function bridgeHome() {
+        var os = require('os');
+        var path = require('path');
+        var env = (typeof process !== 'undefined' && process.env) ? process.env.MV_AI_BRIDGE_HOME : '';
+        return env ? path.resolve(env) : path.join(os.homedir(), '.mv-ai-bridge');
+    }
+
+    function readBridgeToken() {
+        if (TOKEN_PARAM) return TOKEN_PARAM;
+        if (typeof require !== 'function') return '';
+        try {
+            var fs = require('fs');
+            var path = require('path');
+            var home = bridgeHome();
+            try {
+                var session = JSON.parse(fs.readFileSync(path.join(home, 'session.json'), 'utf8'));
+                // With several bridges running, session.json only describes
+                // the latest one, so use it only when the port matches.
+                if (session && session.token && Number(session.port) === PORT) {
+                    return String(session.token);
+                }
+            } catch (e) { /* no usable session file; try the token file */ }
+            return String(fs.readFileSync(path.join(home, 'token'), 'utf8')).trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    var warnedNoToken = false;
+
     function wsUrl() {
+        var url = 'ws://' + HOST + ':' + PORT + '/game';
+        var token = readBridgeToken();
+        if (!token) {
+            if (!warnedNoToken) {
+                warnedNoToken = true;
+                log('no bridge token found; the bridge will reject this connection. ' +
+                    'Start the bridge once or set the Token plugin parameter.');
+            }
+            return url;
+        }
+        return url + '?token=' + encodeURIComponent(token);
+    }
+
+    // For logs: the token must never reach the debug console or the log file.
+    function wsLogUrl() {
         return 'ws://' + HOST + ':' + PORT + '/game';
     }
 
@@ -3742,7 +3830,7 @@
         ws.onopen = function () {
             connected = true;
             reconnectDelay = 1000;
-            log('connected', wsUrl());
+            log('connected', wsLogUrl());
             send({
                 t: 'hello',
                 proto: PROTO,

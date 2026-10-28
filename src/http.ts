@@ -184,9 +184,28 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
     }
   }
 
+  let lastRejectLogAt = 0;
   httpServer.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (url.pathname !== '/game') {
+      socket.destroy();
+      return;
+    }
+    // Browsers let any web page open a WebSocket to 127.0.0.1, and a newer
+    // /game connection replaces the current one. Without this check a page
+    // the user happens to visit could kick the real game out and feed the
+    // agent fabricated state and dialogue.
+    if (!authorized(req, url, token)) {
+      const nowMs = Date.now();
+      if (nowMs - lastRejectLogAt > 30_000) {
+        lastRejectLogAt = nowMs;
+        const origin = String(req.headers.origin ?? 'none').replace(/[^\x20-\x7e]/g, '?').slice(0, 100);
+        console.error(
+          `[mv-ai-bridge] rejected a /game connection: missing or wrong token (origin: ${origin}). ` +
+            'If this is your game, copy the latest plugin (re-run install) or set its Token parameter.',
+        );
+      }
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       socket.destroy();
       return;
     }

@@ -117,8 +117,8 @@ Or connect over HTTP. The token is in `~/.mv-ai-bridge/token`:
 
 | Path | Purpose |
 | --- | --- |
-| `~/.mv-ai-bridge/token` | Bearer token for `/mcp` and `/health`. Created on first run. |
-| `~/.mv-ai-bridge/session.json` | Running bridge address, pid and version. |
+| `~/.mv-ai-bridge/token` | Bearer token for `/mcp`, `/health` and the game connection `/game`. Created on first run. |
+| `~/.mv-ai-bridge/session.json` | Running bridge address, live token, pid and version. The game plugin reads the token from here. |
 | `~/.mv-ai-bridge/notes.json` | Persistent agent notes, keyed by game title. |
 
 Set `MV_AI_BRIDGE_HOME` to relocate that directory.
@@ -285,6 +285,15 @@ it and returns to the map scene; it replaces the runtime state wholesale, so plu
 player loads from the menu is bypassed. This is ideal for retrying a room or a choice, but it is not a save slot: it
 dies with the game process and never appears in the game's load menu.
 
+- `save` is only accepted on a settled map: no message, choice, event, movement or transfer in progress. Otherwise it
+  returns `not_settled` with `effect.blocked_by` (`message`, `choice`, `event`, `transfer`, `moving` or `busy`), or
+  `bad_scene` when the scene is not the map. The save contents keep the map interpreter's progress but not the message
+  window or a battle, so a snapshot taken mid-event would restore without the text that was on screen. Use `wait` with
+  `until: "settled"` and retry.
+- `load` works from any scene (including game over). Like the game's own load, it rebuilds the game objects first,
+  because the save contents do not include `$gameTemp`, `$gameMessage` or `$gameTroop`; a pending message, choice or
+  reserved common event from before the load does not survive it.
+
 ## Uninstall
 
 To remove the bridge from a game:
@@ -299,7 +308,14 @@ licence first: some commercial titles do not permit modifying their files.
 ## Security
 
 - The bridge listens on `127.0.0.1` unless you pass `--host`. Do not expose it to a network you do not control.
-- `/mcp` and `/health` require the bearer token from `~/.mv-ai-bridge/token`. Delete the file to rotate it.
+- `/mcp`, `/health` and the game connection `/game` require the bearer token from `~/.mv-ai-bridge/token`. Delete the
+  file to rotate it.
+- The plugin reads the token from `~/.mv-ai-bridge/session.json` (falling back to the token file, or `MV_AI_BRIDGE_HOME`),
+  or from its `Token` parameter, and sends it as `?token=` when it connects. A connection without it gets a 401. This
+  matters because any web page can open a WebSocket to `127.0.0.1`, and a newer `/game` connection replaces the
+  current one: without the check, a page the user visits could kick the real game out and feed the agent fabricated
+  state and dialogue.
+- A game that still runs an older plugin file does not send the token and is rejected. Re-run `install` to update it.
 - The game plugin connects outwards to the bridge; no inbound port on the game side.
 - Only one write action runs at a time, so an agent cannot interleave two movement routines.
 

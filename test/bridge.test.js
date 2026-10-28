@@ -56,7 +56,7 @@ function envelope(action, status, extra = {}) {
 
 function openGame(port, { title = 'Mock Game', slowWalk = 300 } = {}) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/game`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/game?token=${TOKEN}`);
     ws.once('error', reject);
     ws.once('open', () => {
       ws.send(JSON.stringify({ t: 'hello', proto: 1, game: { title, rpgmaker: '1.6.1' } }));
@@ -187,6 +187,65 @@ test('health endpoint reports the connected game', async () => {
   const body = await response.json();
   assert.equal(body.connected, true);
   assert.equal(body.game.title, 'Health Game');
+  game.close();
+  await new Promise((r) => setTimeout(r, 100));
+});
+
+function tryGame(port, query = '') {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/game${query}`);
+    ws.once('open', () => resolve({ opened: true, ws }));
+    ws.once('unexpected-response', (_req, res) => {
+      res.resume();
+      resolve({ opened: false, status: res.statusCode });
+    });
+    ws.once('error', () => resolve({ opened: false, status: null }));
+  });
+}
+
+test('rejects a game connection without the token', async () => {
+  const result = await tryGame(port);
+  assert.equal(result.opened, false);
+  assert.equal(result.status, 401);
+});
+
+test('rejects a game connection with the wrong token', async () => {
+  const result = await tryGame(port, '?token=not-the-token');
+  assert.equal(result.opened, false);
+  assert.equal(result.status, 401);
+});
+
+test('accepts the token as a query parameter or a bearer header', async () => {
+  const viaQuery = await tryGame(port, `?token=${TOKEN}`);
+  assert.equal(viaQuery.opened, true);
+  viaQuery.ws.close();
+  await new Promise((r) => setTimeout(r, 50));
+
+  const viaHeader = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/game`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    ws.once('open', () => resolve({ opened: true, ws }));
+    ws.once('error', () => resolve({ opened: false }));
+  });
+  assert.equal(viaHeader.opened, true);
+  viaHeader.ws.close();
+  await new Promise((r) => setTimeout(r, 50));
+});
+
+test('an unauthenticated attempt cannot replace the connected game', async () => {
+  const game = await openGame(port, { title: 'Real Game' });
+  await new Promise((r) => setTimeout(r, 100));
+
+  const intruder = await tryGame(port);
+  assert.equal(intruder.opened, false);
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.equal(game.readyState, WebSocket.OPEN);
+  const response = await fetch(`http://127.0.0.1:${port}/health`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  const body = await response.json();
+  assert.equal(body.connected, true);
+  assert.equal(body.game.title, 'Real Game');
   game.close();
   await new Promise((r) => setTimeout(r, 100));
 });
