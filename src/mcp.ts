@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { VERSION } from './cli/constants.js';
 import { BridgeCore } from './core.js';
 import { Envelope } from './protocol.js';
 
@@ -28,7 +29,7 @@ const ENVELOPE_NOTE =
   'Interrupted and partial are normal gameplay outcomes, not tool failures. Read state and new_log before deciding what to do next.';
 
 export function createMcpServer(core: BridgeCore): McpServer {
-  const server = new McpServer({ name: 'mv-ai-bridge', version: '0.1.0' });
+  const server = new McpServer({ name: 'mv-ai-bridge', version: VERSION });
 
   const register = (
     name: string,

@@ -51,8 +51,7 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 
 ## インストール
 
-**ビルド済み（ビルド不要）:** [Releases](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) から
-`rpgmaker-mv-ai-bridge-v0.1.0.zip` を取得してください。プラグイン、1 ファイルにまとめたブリッジ、
+**ビルド済み（ビルド不要）:** [Releases](https://github.com/K-ame/rpgmaker-mv-ai-bridge/releases) から最新の zip を取得してください。プラグイン、1 ファイルにまとめたブリッジ、
 `install.bat` / `install.sh`、`serve.bat` が入っています。必要なのは Node.js 20 以上だけです。
 
 またはソースからビルド:
