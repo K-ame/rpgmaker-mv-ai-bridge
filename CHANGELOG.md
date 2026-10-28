@@ -1,5 +1,7 @@
 # Changelog
 
+[English](CHANGELOG.md) | [简体中文](CHANGELOG.zh-CN.md) | [日本語](CHANGELOG.ja.md)
+
 ## v0.1.2
 
 The first release shaped by live play: a bridge in WSL, a game on Windows, and a
