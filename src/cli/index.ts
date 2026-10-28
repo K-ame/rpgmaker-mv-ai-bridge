@@ -1,11 +1,12 @@
 #!/usr/bin/env node
+import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { BridgeCore } from '../core.js';
+import { BRIDGE_DIR, BridgeCore } from '../core.js';
 import { startServer } from '../http.js';
 import { createMcpServer } from '../mcp.js';
 import { DEFAULT_HOST, DEFAULT_PORT, VERSION } from './constants.js';
 import { doctor } from './doctor.js';
-import { getOrCreateToken, isProcessRunning, readSession, removeSession, writeSession } from './files.js';
+import { getOrCreateToken, isProcessRunning, readSession, removeSession, TOKEN_FILE, writeSession } from './files.js';
 import { installPlugin, manualSnippet } from './install.js';
 
 interface ParsedArgs {
@@ -132,7 +133,11 @@ async function serve(args: ParsedArgs): Promise<void> {
   log(`  game WebSocket : ws://${host}:${port}/game`);
   log(`  MCP (HTTP)    : ${server.url}`);
   log(`  token         : ${token}`);
-  log(`  session file  : ~/.mv-ai-bridge/session.json`);
+  // Absolute paths: with WSL the bridge and the game can have different HOMEs,
+  // and a relative "~/.mv-ai-bridge" hides which side actually holds the token.
+  log(`  bridge home   : ${BRIDGE_DIR}`);
+  log(`  token file    : ${TOKEN_FILE}`);
+  log(`  session file  : ${path.join(BRIDGE_DIR, 'session.json')}`);
   log('  waiting for the game to connect...');
 
   let lastConnected = false;

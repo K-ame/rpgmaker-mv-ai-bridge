@@ -48,7 +48,11 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'observe',
     'Observe',
     'Read the current structured game state: scene, map, player tile and facing, open message text, choice window, ' +
-      'party HP/gold, battle status, and nearby events. "objective" echoes the note you stored under key "objective" ' +
+      'party HP/gold, battle status, and nearby events. state.nearby lists the five closest events with distance and ' +
+      'kind ("action" responds to the action button, "touch" triggers when stepped on, "transfer" is a door or stairs, ' +
+      '"shop" opens a shop), including decorative zero-command events such as beds, so a trigger is not hidden just ' +
+      'because it has no commands. state.message_history keeps the last three lines the frame loop saw, including ' +
+      'lines of a cutscene that auto-advanced between calls. "objective" echoes the note you stored under key "objective" ' +
       '(set it with note {"action":"set","key":"objective","text":"..."}): keep a one-line current goal there and read ' +
       'it back on every observe so you do not drift into reacting only to what is on screen. "threats" lists nearby ' +
       'battle-capable events (roaming monsters) with distance, whether they move, and whether their move route chases ' +
@@ -58,10 +62,14 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'In battle it exposes party_commands, actor_commands, the inputting actor, that actor\'s skill types with every ' +
       'skill (MP/TP cost and usable flag included), battle items, and enemy_targets/actor_targets with the indexes ' +
       'target_index expects — all available throughout the input phase, even when the plugin keeps only one window ' +
-      'focused. In menus, shops and other non-map scenes it lists every visible window with its active cursor, items ' +
-      'and shop prices, so base and custom screens can be navigated with input; save/load screens add a per-slot list ' +
-      'with exists, timestamp and playtime so you never overwrite a save blindly. This is the primary perception tool; ' +
-      'use it before and after every meaningful action. ' +
+      'focused; skill_window/item_window themselves appear only once that command is chosen. battle.log carries the ' +
+      'last Window_BattleLog lines (<...の攻撃！>, damage, state changes) when the scene has one, so battle narration ' +
+      'is readable without pixels. In menus, shops and other non-map scenes it lists every visible window with its ' +
+      'active cursor, items and shop prices, so base and custom screens can be navigated with input; save/load screens ' +
+      'add a per-slot list with exists, timestamp and playtime so you never overwrite a save blindly. On the map, ' +
+      'state.ui lists custom overlay windows (a world-map destination list, a HUD menu) when one is open; the stock ' +
+      'dialogue and map-name windows are excluded because state.message/state.map already cover them. This is the ' +
+      'primary perception tool; use it before and after every meaningful action. ' +
       ENVELOPE_NOTE,
     {
       radius,
@@ -117,8 +125,10 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'number of tiles, status is "partial" (reason "blocked" or "stopped_short"); only fully completed walks return ' +
       '"done". Set avoid_hazard to stop before stepping within N tiles of a roaming monster that starts a battle; the ' +
       'result is "partial" with reason "threat_nearby" and effect.threat identifying the event. Check ' +
-      'effect.steps_done to see how far it got. Outside the map scene it fails with reason "bad_scene" and the current ' +
-      'scene name, so a menu is never mistaken for a map problem. ' +
+      'effect.steps_done to see how far it got. If a message, choice, event or transfer already owns the screen, the ' +
+      'call fails up front with reason "busy" and effect.blocked_by naming it, instead of letting the walk stall. ' +
+      'Outside the map scene it fails with reason "bad_scene" and the current scene name, so a menu is never ' +
+      'mistaken for a map problem. ' +
       ENVELOPE_NOTE,
     {
       direction: z.enum(['up', 'down', 'left', 'right']).describe('Direction to walk.'),
@@ -138,18 +148,28 @@ export function createMcpServer(core: BridgeCore): McpServer {
   register(
     'go_to',
     'Go to tile',
-    'Pathfind around walls and events and walk to an exact tile. Stops early at the next decision point and returns ' +
-      '"partial" with the remaining position if it is blocked mid-route. When the target cannot be reached at all, the ' +
-      'result is an error whose effect carries nearest_reachable {x,y,distance}, blocked_by ' +
-      '("wall" | "event" | "one_way_tile" | "avoidance_zone" | ...), and the target tile passability, so you can pick ' +
-      'a reachable goal instead of retrying blindly. Set avoid_hazard to route around cells within N tiles of roaming ' +
+    'Pathfind around walls and events and walk to an exact tile. effect.path carries the route as MV direction codes ' +
+      '(2 down, 4 left, 6 right, 8 up) and path_length its size, so a route can be cached or drawn. dry_run:true ' +
+      'returns the same path without moving the player — use it to check a route before committing. The target must ' +
+      'be a standable tile: beds, counters and other blocked cells are not, and the result is then an error. Stops ' +
+      'early at the next decision point and returns "partial" with the remaining position if it is blocked mid-route. ' +
+      'When the target cannot be reached at all, the result is an error whose effect carries nearest_reachable ' +
+      '{x,y,distance,steps}, blocked_by ("wall" | "event" | "one_way_tile" | "avoidance_zone" | ...), the target tile ' +
+      'passability and events_at_target, so you can pick a reachable goal instead of retrying blindly. Set ' +
+      'avoid_hazard to route around cells within N tiles of roaming ' +
       'monsters and to stop before stepping toward one; the result then carries reason "threat_nearby" and ' +
-      'effect.threat. The goal tile itself is exempt, so a deliberate approach still works. Outside the map scene it ' +
-      'fails with reason "bad_scene" and the current scene name. ' +
+      'effect.threat. The goal tile itself is exempt, so a deliberate approach still works. If a message, choice, ' +
+      'event or transfer is open, the call fails with reason "busy" and effect.blocked_by ("choice" | "message" | ' +
+      '"event" | "transfer") rather than reporting the tile as a wall. Outside the map scene it fails with reason ' +
+      '"bad_scene" and the current scene name. ' +
       ENVELOPE_NOTE,
     {
       x: z.number().int().describe('Target map x.'),
       y: z.number().int().describe('Target map y.'),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe('Return the path without moving. Default false.'),
       avoid_hazard: z
         .number()
         .int()
@@ -198,7 +218,12 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'Advance the current message: it fast-forwards typing, turns pages, and stops at a choice window ' +
       'or at the end of the event. Each page stays on screen for page_delay_ms (default 2000 ms, from the ' +
       'plugin ReadDelay parameter); that delay applies to message windows only, battle-log lines keep the game\'s own ' +
-      'timing. effect.pages contains the text it passed. Use select afterward when a choice appears. ' +
+      'timing. effect.pages is the list to read: every page that appeared while the call ran, which for a dialogue ' +
+      'event that completes in one call can be the whole conversation (it may also be empty when the call only ' +
+      'advanced an already-seen line). effect.advanced_text is a fallback that only appears when the frame loop saw ' +
+      'a line that pages missed; it is normally absent, so do not read it first. state.message_history keeps the ' +
+      'last few lines and state.battle.log the last battle-log lines afterwards. ' +
+      'Use select afterward when a choice appears. ' +
       'In battle it only pushes log/result windows: while a command or target window is open it refuses with reason ' +
       '"needs_command" and does nothing, so it can never pick an action for you. In the battleEnd phase it presses ok ' +
       'through the victory/EXP windows until the map returns (stop "battle_end"). ' + ENVELOPE_NOTE,
@@ -246,25 +271,37 @@ export function createMcpServer(core: BridgeCore): McpServer {
   register(
     'battle',
     'Battle',
-    '"auto" hands the whole battle to the engine\'s auto-battle loop until it ends, so it gives up tactical control ' +
-      '(no chance to react to low HP, a downed member or a boss phase) — use it for trash fights only. The single-turn ' +
-      'actions (attack/skill/guard/item/escape) issue exactly one command for the actor who is currently inputting and ' +
-      'return as soon as the game commits it; call observe again to see the result and to command the next actor. ' +
-      'The actor command window lists attack, one entry per skill type, guard and item. command_index selects an entry ' +
-      'verbatim; otherwise action selects it by symbol, and skill_type_index picks which skill type when the actor has ' +
-      'several. skill_index/item_index index the list inside the opened window (see observe.battle.skill_window and ' +
-      'observe.battle.item_window, which are aligned with what the player sees). target_index picks an entry of ' +
-      'observe.battle.targets/enemy_targets; it defaults to 0. All of these lists are available during the whole input ' +
-      'phase. "advance" never issues a command: while a command or target window waits it returns needs_command, so this ' +
-      'tool is the only way an action gets chosen. If the call is refused with reason "busy", effect names the action ' +
-      'still running and the battle window state. ' +
+    '"auto" repeats a command until the battle ends; it does NOT hand the battle to the engine\'s auto-battle. ' +
+      'policy "attack" (default) attacks every actor, policy "skill_first" casts the first usable skill while the ' +
+      'actor\'s MP allows and falls back to attack. Neither heals or reacts to a downed member, so use auto for trash ' +
+      'fights only. The single-turn actions (attack/skill/guard/item/escape) issue exactly one command for the actor ' +
+      'who is currently inputting and return as soon as the game commits it; call observe again to see the result and ' +
+      'to command the next actor. The actor command window lists attack, one entry per skill type, guard and item. ' +
+      'command_index selects an entry verbatim; otherwise action selects it by symbol, then by the visible label ' +
+      '(攻撃/たたかう/attack and friends), and for attack only by the first enabled command. skill_type_index picks ' +
+      'which skill type when the actor has several. skill_index/item_index index the list inside the opened window ' +
+      '(observe.battle.skill_window/item_window, aligned with what the player sees; they appear only after that ' +
+      'command is chosen, not during the whole input phase). target_index picks an entry of ' +
+      'observe.battle.targets/enemy_targets; it defaults to 0. A failed skill/item selection cancels its window before ' +
+      'returning the error, so the next call starts from the actor command window again. "advance" never issues a ' +
+      'command: while a command or target window waits it returns needs_command, so this tool is the only way an ' +
+      'action gets chosen. effect.turn is the current round; effect.turns counts rounds that completed during the ' +
+      'call (0 for a single-command call). effect.log carries the last Window_BattleLog lines when the scene has one. ' +
+      'escape adds nearest_threat (coords + direction) so you can step away before the touch event fires again. ' +
+      'If the call is refused with reason "busy", effect names the action still running and the battle window state. ' +
       ENVELOPE_NOTE,
     {
       action: z
         .enum(['auto', 'attack', 'skill', 'guard', 'item', 'escape'])
         .optional()
         .describe(
-          '"auto" fights until the battle ends (engine auto-battle, no tactical control). Default "auto" unless a command selector is supplied, which issues one command.',
+          '"auto" repeats a command until the battle ends (see policy). Default "auto" unless a command selector is supplied, which issues one command.',
+        ),
+      policy: z
+        .enum(['attack', 'skill_first'])
+        .optional()
+        .describe(
+          'Auto-battle policy. "attack" (default) repeats attack; "skill_first" casts the first usable skill while MP allows, then falls back to attack. Only meaningful with action "auto".',
         ),
       command_index: z
         .number()
@@ -364,11 +401,13 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'Raw input',
     'Press one engine button for an exact hold time. This is the escape hatch for menus and minigames that the ' +
       'higher-level tools do not understand yet. Prefer walk/advance/select/interact when they fit. ' +
-      'effect.effective reports whether anything changed (scene, message, player tile/facing). If the button cannot ' +
-      'act now — menu during a message, or a scene that disables the menu — the result is error/partial with reason ' +
-      '"input_swallowed" and effect.blocked_by so a silent no-op never looks like success. On a save screen, ok is ' +
-      'refused ("save_slot_not_chosen") until select has focused a slot, because ok overwrites the slot under the ' +
-      'cursor. ' +
+      'effect.effective reports whether anything changed (scene, message, player tile/facing, any visible window and ' +
+      'its cursor, including windows a custom screen draws outside the stock window layer). effect.window names the ' +
+      'window that owns the cursor after the press, with index and selected label, so an arrow press on a custom list ' +
+      'says what it selected. If the button cannot act now — menu during a message, or a scene that disables the menu ' +
+      '— the result is error/partial with reason "input_swallowed" and effect.blocked_by so a silent no-op never ' +
+      'looks like success. On a save screen, ok is refused ("save_slot_not_chosen") until select has focused a slot, ' +
+      'because ok overwrites the slot under the cursor. ' +
       ENVELOPE_NOTE,
     {
       button: z

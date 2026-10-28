@@ -39,7 +39,9 @@ One process serves both halves:
 - `ws://<host>:<port>/game` for the game plugin (the game dials out to the bridge).
 - `http://<host>:<port>/mcp` for MCP clients (Streamable HTTP, JSON responses).
 - `http://<host>:<port>/health` for a quick status check. It requires the token because it returns the game title and
-  a copy of the last observed game state, not just a boolean.
+  a copy of the last observed game state, not just a boolean. `rejected_last_minute` counts rejected game connections
+  over the last 60 seconds by origin kind (`game`, `extension`, `web`, `none`), which separates a wrong token from
+  unrelated localhost probes.
 
 The bridge binds to loopback by default and requires a bearer token.
 
@@ -68,8 +70,9 @@ node dist/cli/index.js install "/path/to/MyGame"
 ```
 
 `install` writes `www/js/plugins/MV_AI_Bridge.js`, appends the entry at the end of `www/js/plugins.js` (so the plugin
-wraps every other plugin's behaviour), and keeps a one-time backup at `plugins.js.mv-ai-bridge.bak`.
-A short manual snippet is printed if `plugins.js` is not plain JSON. See [Uninstall](#uninstall) to undo it.
+wraps every other plugin's behaviour), writes the current token into the entry's `Token` parameter, and keeps a
+one-time backup at `plugins.js.mv-ai-bridge.bak`. A short manual snippet is printed if `plugins.js` is not plain JSON.
+See [Uninstall](#uninstall) to undo it.
 
 Run `node dist/cli/index.js doctor "/path/to/MyGame"` to check Node version, project layout, plugin placement,
 token and session state.
@@ -123,6 +126,22 @@ Or connect over HTTP. The token is in `~/.mv-ai-bridge/token`:
 
 Set `MV_AI_BRIDGE_HOME` to relocate that directory.
 
+### WSL + Windows
+
+When the bridge runs under WSL and the game runs on Windows, the two sides have different home directories: the
+bridge reads `/home/<you>/.mv-ai-bridge/token` while the plugin looks under `C:\Users\<you>\.mv-ai-bridge\token`, and
+the tokens then differ. Connections are rejected with 401 and `/health` stays `connected: false` even though the game
+window looks fine. Any one of these fixes it:
+
+- Run `install` from the side that also runs `serve` (both WSL or both Windows), so the token written into
+  `plugins.js` matches; the plugin's `Token` parameter takes priority over the file.
+- Or set `MV_AI_BRIDGE_HOME` on the bridge to the Windows-side directory the game can read.
+- Or copy the token file to the other side.
+
+`serve` prints the absolute bridge home, token file and session file paths so it is clear which side holds them.
+`/health` reports rejected game connections by origin kind (`game`, `extension`, `web`, `none`) over the last minute,
+which distinguishes a wrong token from unrelated localhost probes.
+
 ## Tools
 
 Every call returns the same envelope:
@@ -153,23 +172,23 @@ Every call returns the same envelope:
 
 | Tool | What it does |
 | --- | --- |
-| `observe` | Scene, map, player tile/facing, open message, choices, party, battle, nearby events. `objective` echoes the note stored under key `objective`, so a long session can keep its goal in view. On the map it also lists `threats` (battle events within 8 tiles with distance, moving and chases), `balloons` (quest markers — `!` / `?` overlays — within 8 tiles with distance, balloon id and source image) and `world_frozen` (true while `FreezeWhileThinking` is holding the map still). In battle the whole input phase exposes `party_commands`, `actor_commands`, the inputting actor, skill types with every skill (MP/TP cost and usable flag), battle items, and `enemy_targets` / `actor_targets` whose indexes are what `target_index` drives — not just the one focused window. In menus, shops and other non-map scenes it lists every visible window with cursor, items and shop prices; save screens add per-slot `exists` / `timestamp` / `playtime`. |
+| `observe` | Scene, map, player tile/facing, open message, choices, party, battle, nearby events. `state.nearby` lists the five closest events as `{event_id, name, x, y, distance, kind}`, where `kind` is `action` (action button), `touch` (player/event touch), `transfer` (door or stairs), `shop` or `other`; zero-command decoration such as beds and locked doors is included, because those are often the trigger the agent needs. `state.message_history` keeps the last three dialogue lines the frame loop saw, including cutscene lines that were auto-advanced between calls. `objective` echoes the note stored under key `objective`, so a long session can keep its goal in view. On the map it also lists `threats` (battle events within 8 tiles with distance, moving and chases), `balloons` (quest markers — `!` / `?` overlays — within 8 tiles with distance, balloon id and source image) and `world_frozen` (true while `FreezeWhileThinking` is holding the map still). In battle the whole input phase exposes `party_commands`, `actor_commands`, the inputting actor, skill types with every skill (MP/TP cost and usable flag), battle items, and `enemy_targets` / `actor_targets` whose indexes are what `target_index` drives — not just the one focused window; `skill_window` / `item_window` themselves exist only after that command is chosen. `battle.log` carries the last `Window_BattleLog` lines. In menus, shops and other non-map scenes it lists every visible window with cursor, items and shop prices; save screens add per-slot `exists` / `timestamp` / `playtime`. On the map, `state.ui` lists custom overlay windows (a world-map destination list, a HUD menu) when one is open; the stock dialogue and map-name windows are excluded because `state.message` / `state.map` already cover them. |
 | `look` | Local map as a character grid (`@` you, `E` event, `.` walkable, `#` blocked) with map-coordinate `origin` and an `events` list. `detail: "full"` returns per-cell passability instead. Out-of-map cells are cropped and an oversized radius is clamped to the map (reported in `radius`), so the result is never silently empty; `overview: true` returns the whole map. Outside the map scene it fails with `bad_scene` and the current scene name. |
 | `list_events` | Nearby events with names, distance, trigger type, `interact_from` (`adjacent` or `here`), `action_trigger`, `commands` / `empty` (the active page holds no commands, so pressing the button does nothing), `hazard` (active page starts a battle, directly or via a common event) and `chases` (move route follows the player). Also `balloon` (quest marker above the event: 1 `!`, 2 `?`, 0 none, detected from the overlay charset or a live balloon), `page` (active page index and total), `note` (event note) and `page_note` (comment commands of the active page, where note-driven plugins keep their tags); the last two appear only when used. |
-| `walk` | Hold a direction for up to N tiles. Returns `partial` if it stops short (wall or blocked step). `interrupted_by` distinguishes `message` (advance it), `choice` (select it), `event`, `transfer` and the new scene. `avoid_hazard: N` stops before stepping within N tiles of a battle event. Outside the map scene (menus, saves, ...) it fails with `bad_scene` and the current scene name. |
-| `go_to` | A* pathfind to an exact tile. On failure returns `nearest_reachable` and `blocked_by` (`wall`, `event`, `one_way_tile`, `avoidance_zone`, ...). `avoid_hazard: N` routes around battle events and stops if the next step closes in. Outside the map scene it fails with `bad_scene`. |
+| `walk` | Hold a direction for up to N tiles. Returns `partial` if it stops short (wall or blocked step). `interrupted_by` distinguishes `message` (advance it), `choice` (select it), `event`, `transfer` and the new scene. If a message, choice, event or transfer already owns the screen, the call fails up front with `busy` and `blocked_by` instead of letting the walk stall. `avoid_hazard: N` stops before stepping within N tiles of a battle event. Outside the map scene (menus, saves, ...) it fails with `bad_scene` and the current scene name. |
+| `go_to` | A* pathfind to an exact tile. `effect.path` is the route as MV direction codes (2 down, 4 left, 6 right, 8 up) and `path_length` its size, so a route can be cached or drawn; `dry_run: true` returns the same path without moving. The target tile must be standable — beds, counters and walls are not — and failure returns an error with `nearest_reachable {x, y, distance, steps}`, `blocked_by` (`wall`, `event`, `one_way_tile`, `avoidance_zone`, ...), `target_passable` and `events_at_target`; read those instead of retrying blindly. A window that owns the screen returns `busy` with `blocked_by` (`choice`, `message`, `event`, `transfer`) rather than blaming the map. `avoid_hazard: N` routes around battle events and stops if the next step closes in. Outside the map scene it fails with `bad_scene`. |
 | `talk_to` | Start a map event with the action button: face it from an adjacent tile, walk onto its tile for `interact_from: "here"` events, or stand in front of a counter and face it for clerks behind one (`interact_from: "across_counter"`). Errors distinguish unreachable tiles, non-action pages and empty placeholder pages; outside the map scene it fails with `bad_scene`. |
 | `interact` | One action-button press. |
-| `advance` | Fast-forward typing, turn pages, stop at a choice or the end of the event. `page_delay_ms` applies to message windows only; battle-log lines keep the game's own pace. In battle it never issues a command: it returns `needs_command` while a command or target window waits, and pushes victory/EXP windows in the `battleEnd` phase (`stop: "battle_end"`) until the map returns. |
+| `advance` | Fast-forward typing, turn pages, stop at a choice or the end of the event. Read `effect.pages`: every page that appeared while the call ran, which for an event that completes in one call can be the whole conversation (and can be empty when the call only pushed an already-seen line). `effect.advanced_text` is a fallback for lines the frame loop saw but `pages` missed; it is normally absent. `page_delay_ms` applies to message windows only; battle-log lines keep the game's own pace. In battle it never issues a command: it returns `needs_command` while a command or target window waits, and pushes victory/EXP windows in the `battleEnd` phase (`stop: "battle_end"`) until the map returns. |
 | `select` | Pick an option by index or label in the message choice, an event's Select Item window, or the active menu/shop/battle window (same index as `observe.ui`). Waits for a menu scene that is still opening. On a save screen you must focus a slot with select; a bare `input ok` is refused. |
 | `back` | Cancel button (close menus, back out). |
-| `battle` | Drive the battle UI: `auto` hands the fight to the engine's auto-battle loop (no tactical control); a command selector issues exactly one command for the inputting actor. A `busy` refusal carries `effect.active_action` and the battle window state. |
+| `battle` | Drive the battle UI: `auto` repeats a command until the fight ends — `policy: "attack"` (default) attacks, `policy: "skill_first"` casts the first usable skill while MP allows and falls back to attack; it is not the engine's auto-battle and never heals. A command selector issues exactly one command for the inputting actor. The action is matched by `command_index`, then by symbol, then by visible label. A failed `skill`/`item` selection cancels its window before returning the error. `effect.turn` is the current round, `effect.turns` rounds that completed during the call, `effect.log` the last battle-log lines, and `escape` adds `nearest_threat` (coords + direction). A `busy` refusal carries the battle window state. |
 | `manage` | Out-of-battle party control: roster with equipment/skills/inventory, equip a slot, swap formation, use an item. |
 | `title` | New game, continue from the newest save, options, back. The argument is `action`. |
 | `wait` | Wait for settled / message / choice / battle / scene change / milliseconds. |
 | `checkpoint` | Save, load, list or delete an in-memory snapshot. Never touches save slots on disk. |
-| `input` | Raw engine button press (`button`, `hold_ms`) with an exact hold time. `effect.effective` says whether anything changed; a button that cannot act (menu during a message, a scene that disables it) returns `reason: "input_swallowed"` with `blocked_by`. On a save screen ok returns `save_slot_not_chosen` until select has focused a slot. |
-| `log` | Polled event log: messages, choices, transfers, scene changes, battle starts/ends, party or enemy state and equipment changes, plus `hint` entries for dialogue that states a requirement or clue. |
+| `input` | Raw engine button press (`button`, `hold_ms`) with an exact hold time. `effect.effective` says whether anything changed (including a cursor move in a custom window); `effect.window` names the window that owns the cursor afterwards with `index` and `selected`. A button that cannot act (menu during a message, a scene that disables it) returns `reason: "input_swallowed"` with `blocked_by`. On a save screen ok returns `save_slot_not_chosen` until select has focused a slot. |
+| `log` | Polled event log: messages, choices, transfers, scene changes, battle starts/ends, party or enemy state and equipment changes, plus `hint` entries for dialogue that states a requirement or clue. A cutscene that moves the player on the same map without a scene change is logged as `transfer_by_event` with `from`, `to` and the running `event_id`, so old coordinate targets are visibly stale. |
 | `note` | Persistent notes on the bridge machine, keyed by game title. The value under key `objective` is echoed by every observe. Example: `{"action":"set","key":"objective","text":"Earn 2000G to register at the guild; buy a weapon before leaving town"}`. |
 
 ### Error reasons
@@ -239,7 +258,15 @@ accidental encounters, not a guarantee of evasion.
 ### Battle tactics
 
 The bridge does not decide tactics; it exposes every option and executes the one the agent picks. `battle auto` is
-the exception: it hands the whole fight to the engine's auto-battle loop, so it is meant for trash encounters.
+the exception, and it is deliberately small: `policy: "attack"` (the default) repeats attack for every actor;
+`policy: "skill_first"` casts the first usable skill while that actor's MP allows and falls back to attack. It is
+not the engine's auto-battle — nobody heals, swaps targets by weakness, or reacts to a downed member — so it is
+meant for trash encounters.
+
+`effect.turn` is the round the call ran in; `effect.turns` counts rounds that completed while it ran (a
+single-command call returns 0 because it ends as soon as the game commits the command). `effect.log` mirrors the
+last `Window_BattleLog` lines. After `escape`, `effect.nearest_threat` gives the closest battle event with coords and
+direction: a chase event retriggers immediately if the player stands still, so step away before doing anything else.
 
 - `observe` during battle returns `state.battle.commands` (the actor command window: attack, one entry per skill
   type, guard, item), `state.battle.actor` (who is choosing), `skill_types` with every skill and its
@@ -309,9 +336,11 @@ licence first: some commercial titles do not permit modifying their files.
 
 - The bridge listens on `127.0.0.1` unless you pass `--host`. Do not expose it to a network you do not control.
 - `/mcp`, `/health` and the game connection `/game` require the bearer token from `~/.mv-ai-bridge/token`. Delete the
-  file to rotate it.
-- The plugin reads the token from `~/.mv-ai-bridge/session.json` (falling back to the token file, or `MV_AI_BRIDGE_HOME`),
-  or from its `Token` parameter, and sends it as `?token=` when it connects. A connection without it gets a 401. This
+  file to rotate it, then re-run `install` (or clear the plugin's `Token` parameter) so the game sends the new one.
+- The plugin sends its `Token` parameter when set, otherwise the live token from `~/.mv-ai-bridge/session.json`
+  (matching port required), otherwise the token file (`MV_AI_BRIDGE_HOME` respected), as `?token=`. `install` writes
+  the current token into that parameter, in plain text, so keep the game folder private. A connection without the
+  token gets a 401. This
   matters because any web page can open a WebSocket to `127.0.0.1`, and a newer `/game` connection replaces the
   current one: without the check, a page the user visits could kick the real game out and feed the agent fabricated
   state and dialogue.
@@ -350,6 +379,9 @@ mock game in `npm test`; a live battle is still pending, so treat battle support
   with its own input flow can degrade them; use `input` for screens it does not model.
 - **Checkpoints are memory-only.** They live in the running process, never appear in the load menu and disappear
   when the game closes.
+- **`go_to` destinations must be standable.** Beds, counters, walls and other blocked tiles cannot be walked to, and
+  the call returns `unreachable` with diagnostics instead. Read `effect.nearest_reachable` (plus `blocked_by`,
+  `target_passable`, `events_at_target`) and target that tile, or use `dry_run: true` to inspect a route first.
 
 ## License
 

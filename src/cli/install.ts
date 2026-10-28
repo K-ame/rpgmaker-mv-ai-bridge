@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findProject, PluginEntry, ProjectLayout, readPlugins, writePlugins } from './files.js';
+import { findProject, getOrCreateToken, PluginEntry, ProjectLayout, readPlugins, writePlugins } from './files.js';
 import { PLUGIN_NAME } from './constants.js';
 
 function packageRoot(): string {
@@ -42,6 +42,10 @@ export function installPlugin(gameDir: string, port: number, debug = false): Ins
     parameters: {
       Host: '127.0.0.1',
       Port: String(port),
+      // Written because the game and the bridge can run on different sides of
+      // WSL, where the plugin's HOME is not the bridge's HOME. A token stored
+      // here still works when the files cannot see each other.
+      Token: getOrCreateToken(),
       Debug: debug ? 'true' : 'false',
       FreezeWhileThinking: 'false',
     },
@@ -68,6 +72,7 @@ export function manualSnippet(port: number): string {
       parameters: {
         Host: '127.0.0.1',
         Port: String(port),
+        Token: getOrCreateToken(),
         Debug: 'false',
         FreezeWhileThinking: 'false',
       },

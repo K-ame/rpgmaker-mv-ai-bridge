@@ -98,11 +98,29 @@ function loadPlugin({ params = {}, files = {}, env = {} } = {}) {
   ctx.window = ctx;
   ctx.global = ctx;
 
-  // A calm map by default; tests flip individual stubs.
+  // A calm 20x20 map by default; tests flip individual stubs.
+  const W = 20;
   ctx.SceneManager._scene = new Scene_Map();
   ctx.$dataMap = {};
-  ctx.$gameMap = { isEventRunning: () => false, mapId: () => 1 };
-  ctx.$gamePlayer = { isTransferring: () => false, isMoving: () => false };
+  ctx.$dataMapInfos = {};
+  ctx.$gameMap = {
+    isEventRunning: () => false,
+    mapId: () => 1,
+    width: () => W,
+    height: () => W,
+    events: () => [],
+    isValid: (x, y) => x >= 0 && y >= 0 && x < W && y < W,
+    roundXWithDirection: (x, d) => x + (d === 6 ? 1 : d === 4 ? -1 : 0),
+    roundYWithDirection: (y, d) => y + (d === 2 ? 1 : d === 8 ? -1 : 0),
+  };
+  ctx.$gamePlayer = {
+    x: 0,
+    y: 0,
+    isTransferring: () => false,
+    isMoving: () => false,
+    direction: () => 2,
+    canPass: () => true,
+  };
   ctx.$gameMessage = { isBusy: () => false };
   ctx.$gameSystem = {
     onBeforeSave() {
@@ -265,4 +283,126 @@ test('checkpoint load reports an unknown checkpoint without touching the game', 
   assert.equal(reply.ok, false);
   assert.equal(reply.reason, 'checkpoint_not_found');
   assert.deepEqual(calls, []);
+});
+
+test('state.nearby lists the closest events with a kind', () => {
+  const { ctx, connect, command, consoleLines } = loadPlugin({ params: { Debug: 'true' } });
+  const ws = connect();
+  const page = (trigger, codes) => ({ trigger, list: codes.map((code) => ({ code })) });
+  const ev = (id, name, x, y, pages) => ({
+    _erased: false,
+    _pageIndex: 0,
+    x,
+    y,
+    eventId: () => id,
+    event: () => ({ name, pages }),
+    list: () => pages[0].list,
+  });
+  ctx.$gamePlayer.x = 5;
+  ctx.$gamePlayer.y = 5;
+  ctx.$gameMap.events = () => [
+    ev(1, 'Bed', 5, 6, [page(0, [0])]),
+    ev(2, 'Robert', 7, 5, [page(0, [101, 0])]),
+    ev(3, 'Stairs', 5, 2, [page(0, [201, 0])]),
+    ev(4, 'Clerk', 9, 5, [page(0, [302, 0])]),
+    ev(5, 'Floor trigger', 4, 5, [page(1, [101, 0])]),
+    ev(6, 'Far away', 19, 19, [page(0, [0])]),
+  ];
+
+  const reply = command(ws, 'state');
+  assert.ok(reply.effect, consoleLines.join('\n'));
+  const nearby = reply.effect.nearby;
+  assert.equal(nearby.length, 5);
+  assert.deepEqual(nearby.map((n) => n.event_id), [1, 5, 2, 3, 4]);
+  const kinds = Object.fromEntries(nearby.map((n) => [n.event_id, n.kind]));
+  assert.deepEqual(kinds, { 1: 'action', 5: 'touch', 2: 'action', 3: 'transfer', 4: 'shop' });
+});
+
+test('go_to dry_run returns the route without moving the player', () => {
+  const { ctx, connect, command } = loadPlugin();
+  const ws = connect();
+  ctx.$gamePlayer.x = 1;
+  ctx.$gamePlayer.y = 1;
+
+  const reply = command(ws, 'go_to', { x: 4, y: 1, dry_run: true });
+  assert.equal(reply.ok, true);
+  assert.equal(reply.status, 'done');
+  assert.equal(reply.effect.dry_run, true);
+  assert.deepEqual(reply.effect.path, [6, 6, 6]);
+  assert.equal(reply.effect.path_length, 3);
+  assert.equal(ctx.$gamePlayer.x, 1);
+  assert.equal(ctx.$gamePlayer.y, 1);
+});
+
+test('go_to blames an open choice window instead of an unreachable wall', () => {
+  const { ctx, connect, command } = loadPlugin();
+  const ws = connect();
+  ctx.$gameMessage = { isBusy: () => true };
+  ctx.SceneManager._scene._messageWindow = {
+    _choiceWindow: {
+      active: true,
+      _list: [{ name: 'はい' }],
+      isOpen: () => true,
+      index: () => 0,
+    },
+  };
+
+  const reply = command(ws, 'go_to', { x: 2, y: 1 });
+  assert.equal(reply.ok, false);
+  assert.equal(reply.reason, 'busy');
+  assert.equal(reply.effect.blocked_by, 'choice');
+});
+
+test('walk refuses to start while a message owns the screen', () => {
+  const { ctx, connect, command } = loadPlugin();
+  const ws = connect();
+  ctx.$gameMessage = { isBusy: () => true };
+
+  const reply = command(ws, 'walk', { direction: 'down', steps: 1 });
+  assert.equal(reply.ok, false);
+  assert.equal(reply.reason, 'busy');
+  assert.equal(reply.effect.blocked_by, 'message');
+  assert.equal(ctx.$gamePlayer.y, 0);
+});
+
+test('state.ui exposes a custom map overlay window with its cursor', () => {
+  const { ctx, connect, command } = loadPlugin();
+  const ws = connect();
+  const win = {
+    constructor: { name: 'Window_DestinationList' },
+    visible: true,
+    active: true,
+    isOpen: () => true,
+    index: () => 1,
+    maxCols: () => 1,
+    maxItems: () => 3,
+    _list: [{ name: '帝国マルドニア' }, { name: 'マルドニア北街道' }],
+  };
+  ctx.SceneManager._scene._windowLayer = { children: [win] };
+
+  const reply = command(ws, 'state');
+  assert.equal(reply.effect.ui.scene, 'map');
+  const listed = reply.effect.ui.windows.find((w) => w.name === 'Window_DestinationList');
+  assert.ok(listed);
+  assert.equal(listed.index, 1);
+  assert.equal(listed.selected, 'マルドニア北街道');
+  assert.deepEqual(listed.items.map((i) => i.name), ['帝国マルドニア', 'マルドニア北街道']);
+});
+
+test('log records a same-map jump as transfer_by_event', () => {
+  const { ctx, connect, command } = loadPlugin();
+  const ws = connect();
+  ctx.$gamePlayer.x = 1;
+  ctx.$gamePlayer.y = 1;
+  for (let i = 0; i < 5; i++) ctx.SceneManager.updateMain();
+
+  ctx.$gamePlayer.x = 6;
+  ctx.$gamePlayer.y = 2;
+  for (let i = 0; i < 5; i++) ctx.SceneManager.updateMain();
+
+  const reply = command(ws, 'log', { since: 0 });
+  const jump = reply.effect.items.find((it) => it.type === 'transfer_by_event');
+  assert.ok(jump, JSON.stringify(reply.effect.items));
+  assert.deepEqual(jump.data.from, { x: 1, y: 1 });
+  assert.deepEqual(jump.data.to, { x: 6, y: 2 });
 });

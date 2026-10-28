@@ -103,7 +103,7 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
         json(res, 401, { error: 'unauthorized' });
         return;
       }
-      json(res, 200, { ok: true, ...core.session.summary() });
+      json(res, 200, { ok: true, ...core.session.summary(), rejected_last_minute: rejectedLastMinute() });
       return;
     }
 
@@ -184,7 +184,52 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
     }
   }
 
-  let lastRejectLogAt = 0;
+  // One chatty source (typically a browser extension probing localhost) used
+  // to consume the single 30-second log slot, hiding the game's own 401s.
+  // Group by origin kind and report a count per window instead.
+  const REJECT_WINDOW_MS = 60_000;
+  const REJECT_LOG_MS = 30_000;
+  const rejectLog = new Map<string, { lastLogAt: number; count: number }>();
+  const rejectTimes: Array<{ at: number; kind: string }> = [];
+
+  function rejectKind(origin: unknown): string {
+    const value = typeof origin === 'string' ? origin : '';
+    if (!value) return 'game'; // the game plugin does not send an Origin header
+    if (/^(chrome|moz|safari-web)-extension:\/\//i.test(value)) return 'extension';
+    if (value === 'null') return 'none';
+    return 'web';
+  }
+
+  function noteRejectedGame(origin: unknown): void {
+    const nowMs = Date.now();
+    const kind = rejectKind(origin);
+    while (rejectTimes.length && nowMs - rejectTimes[0].at > REJECT_WINDOW_MS) rejectTimes.shift();
+    rejectTimes.push({ at: nowMs, kind });
+    if (rejectTimes.length > 5000) rejectTimes.splice(0, rejectTimes.length - 5000);
+
+    const stat = rejectLog.get(kind) ?? { lastLogAt: 0, count: 0 };
+    stat.count += 1;
+    if (nowMs - stat.lastLogAt > REJECT_LOG_MS) {
+      const shown = String(origin ?? 'none').replace(/[^\x20-\x7e]/g, '?').slice(0, 100);
+      console.error(
+        `[mv-ai-bridge] rejected ${stat.count}x /game connections ` +
+          `(kind=${kind}, missing or wrong token, origin: ${shown}). ` +
+          'If this is your game, copy the latest plugin (re-run install) or set its Token parameter.',
+      );
+      stat.count = 0;
+      stat.lastLogAt = nowMs;
+    }
+    rejectLog.set(kind, stat);
+  }
+
+  function rejectedLastMinute(): Record<string, number> {
+    const nowMs = Date.now();
+    while (rejectTimes.length && nowMs - rejectTimes[0].at > REJECT_WINDOW_MS) rejectTimes.shift();
+    const out: Record<string, number> = {};
+    for (const entry of rejectTimes) out[entry.kind] = (out[entry.kind] ?? 0) + 1;
+    return out;
+  }
+
   httpServer.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (url.pathname !== '/game') {
@@ -196,15 +241,7 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
     // the user happens to visit could kick the real game out and feed the
     // agent fabricated state and dialogue.
     if (!authorized(req, url, token)) {
-      const nowMs = Date.now();
-      if (nowMs - lastRejectLogAt > 30_000) {
-        lastRejectLogAt = nowMs;
-        const origin = String(req.headers.origin ?? 'none').replace(/[^\x20-\x7e]/g, '?').slice(0, 100);
-        console.error(
-          `[mv-ai-bridge] rejected a /game connection: missing or wrong token (origin: ${origin}). ` +
-            'If this is your game, copy the latest plugin (re-run install) or set its Token parameter.',
-        );
-      }
+      noteRejectedGame(req.headers.origin);
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       socket.destroy();
       return;

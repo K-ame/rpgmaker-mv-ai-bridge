@@ -52,7 +52,7 @@
     'use strict';
 
     var PLUGIN_NAME = 'MV_AI_Bridge';
-    var VERSION = '0.1.0';
+    var VERSION = '0.1.2';
     var PROTO = 1;
 
     var params = PluginManager.parameters(PLUGIN_NAME) || {};
@@ -267,6 +267,19 @@
         return true;
     }
 
+    // Movement only starts from a settled map. Pathfinding still returns a
+    // route while a dialogue or choice window is up, but the walk is swallowed
+    // and reporting that as "wall" sends the agent down the wrong diagnosis.
+    // Name the real blocker instead.
+    function movementBlocker() {
+        if (sceneTag() !== 'map' || !inMap()) return null;
+        if (isTransferring()) return 'transfer';
+        if (choiceVisible()) return 'choice';
+        if (isMessageBusy()) return 'message';
+        if (isEventRunning()) return 'event';
+        return null;
+    }
+
     // The optional thinking freeze. Only ever holds a settled map with no job
     // in flight; input polling and rendering keep running so the window stays
     // responsive and is still capturable by OBS.
@@ -338,6 +351,41 @@
             speaker: speaker ? String(speaker) : null,
             window_hidden: !!(mw && typeof mw.isHidden === 'function' && mw.isHidden())
         };
+    }
+
+    // A cutscene can open and close a message between two bridge calls, so the
+    // frame loop keeps the last pages it saw. observe exposes the last three
+    // and advance drains the rest, instead of losing text that the window no
+    // longer shows.
+    var messageHistory = [];
+    var MESSAGE_HISTORY_MAX = 10;
+
+    function rememberMessage(text, speaker) {
+        if (!text) return;
+        var last = messageHistory[messageHistory.length - 1];
+        if (last && last.text === text) return;
+        messageHistory.push({ text: String(text), speaker: speaker || null, tick: tick });
+        if (messageHistory.length > MESSAGE_HISTORY_MAX) messageHistory.shift();
+    }
+
+    function messageHistorySlice(n) {
+        return messageHistory.slice(-(n || 3)).map(function (m) {
+            return { text: m.text, speaker: m.speaker };
+        });
+    }
+
+    function historySince(startTick) {
+        var out = [];
+        for (var i = 0; i < messageHistory.length; i++) {
+            var m = messageHistory[i];
+            if (m.tick > startTick) out.push({ text: m.text, speaker: m.speaker });
+        }
+        return out;
+    }
+
+    function sampleMessageHistory() {
+        var mi = messageInfo();
+        if (mi && mi.text) rememberMessage(mi.text, mi.speaker);
     }
 
     function stateNames(battler) {
@@ -569,6 +617,15 @@
         if (mw) {
             info.windows.message = { active: !!mw.active, open: safe(function () { return mw.isOpen(); }, null), pause: !!mw.pause };
         }
+        // Window_BattleLog owns the action narration (<...の攻撃！>, damage,
+        // state changes). Stock MV keeps the current action's lines in
+        // _lines; expose the tail so battle text is readable without pixels.
+        var lw = s._logWindow || s._battleLogWindow;
+        if (lw && lw._lines && lw._lines.length) {
+            info.log = lw._lines.slice(-12).map(function (line) {
+                return cleanText(typeof line === 'string' ? line : (line && line.text) || '');
+            }).filter(Boolean);
+        }
 
         // During input the agent needs every option up front, not just the
         // window that happens to be focused: choosing a command is what opens
@@ -713,38 +770,144 @@
         return out;
     }
 
-    function uiInfo() {
-        var s = sceneOf();
-        if (!s || !s._windowLayer) return null;
-        var kids = s._windowLayer.children || [];
-        var windows = [];
-        for (var i = 0; i < kids.length; i++) {
-            var w = kids[i];
-            if (!w) continue;
-            // Custom menus (MOG and friends) keep the real windows offscreen
-            // and draw sprites instead; the window still owns the cursor, so
-            // active or open windows count even when they are not visible.
-            var open = safe(function () { return !!(w.isOpen && w.isOpen()); }, false);
-            if (!w.visible && !w.active && !open) continue;
-            var cname = (w.constructor && w.constructor.name) || 'Window';
-            var win = {
-                name: cname,
-                active: !!w.active,
-                open: open,
-                visible: w.visible !== false
-            };
-            var cols = safe(function () { return w.maxCols ? w.maxCols() : null; }, null);
-            if (cols) win.max_cols = cols;
-            if (typeof w.index === 'function') win.index = safe(function () { return w.index(); }, null);
-            if (typeof w.maxItems === 'function') win.max_items = safe(function () { return w.maxItems(); }, null);
+    function windowDisplayName(w) {
+        return (w && w.constructor && w.constructor.name) || 'Window';
+    }
+
+    function windowOpen(w) {
+        return safe(function () { return !!(w.isOpen && w.isOpen()); }, false);
+    }
+
+    // Custom menus (MOG and friends) keep the real windows offscreen and draw
+    // sprites instead; the window still owns the cursor, so active or open
+    // windows count even when they are not visible.
+    function windowLiveOrActive(w) {
+        if (!w) return false;
+        return !!(w.visible || w.active || windowOpen(w));
+    }
+
+    function selectedText(w, idx) {
+        var list = (w._list && w._list.length) ? w._list : w._data;
+        if (!list || idx === null || idx === undefined || idx < 0 || idx >= list.length) return null;
+        var it = list[idx];
+        if (it === null || it === undefined) return null;
+        return cleanText(it.name !== undefined ? it.name : it);
+    }
+
+    // One window in the same shape ui.windows has always used. compact skips
+    // the item list: input replies only need to say where the cursor is.
+    function windowBrief(w, compact) {
+        var open = windowOpen(w);
+        var cname = windowDisplayName(w);
+        var win = {
+            name: cname,
+            active: !!w.active,
+            open: open,
+            visible: w.visible !== false
+        };
+        var cols = safe(function () { return w.maxCols ? w.maxCols() : null; }, null);
+        if (cols) win.max_cols = cols;
+        if (typeof w.index === 'function') {
+            win.index = safe(function () { return w.index(); }, null);
+            var sel = selectedText(w, win.index);
+            if (sel !== null) win.selected = sel;
+        }
+        if (typeof w.maxItems === 'function') win.max_items = safe(function () { return w.maxItems(); }, null);
+        if (!compact) {
             var items = windowItems(w);
             if (items) win.items = items;
             if (cname === 'Window_SavefileList') win.slots = savefileSlots();
             var text = safe(function () { return w._text ? cleanText(w._text) : null; }, null);
             if (text) win.text = text;
-            windows.push(win);
         }
-        return { scene: sceneTag(), windows: windows };
+        return win;
+    }
+
+    // Every live window the scene owns, in draw order. Custom map screens
+    // (destination lists, HUD menus) often add windows outside _windowLayer,
+    // so scan the scene's own children too and dedupe.
+    function collectSceneWindows(s, opts) {
+        opts = opts || {};
+        var out = [];
+        var seen = [];
+        var add = function (w) {
+            if (!w || seen.indexOf(w) >= 0) return;
+            seen.push(w);
+            if (!windowLiveOrActive(w)) return;
+            out.push(w);
+        };
+        if (s._windowLayer && s._windowLayer.children) {
+            var kids = s._windowLayer.children;
+            for (var i = 0; i < kids.length; i++) add(kids[i]);
+        }
+        if (s.children) {
+            for (var j = 0; j < s.children.length; j++) {
+                var c = s.children[j];
+                if (c && windowDisplayName(c).indexOf('Window_') === 0) add(c);
+            }
+        }
+        // Choice/number/event-item windows live inside the message window.
+        if (opts.withMessage && s._messageWindow) {
+            var mw = s._messageWindow;
+            add(mw._choiceWindow);
+            add(mw._numberWindow);
+            add(mw._itemWindow);
+        }
+        return out;
+    }
+
+    function uiInfo() {
+        var s = sceneOf();
+        if (!s) return null;
+        var wins = collectSceneWindows(s, { withMessage: true });
+        if (!wins.length) return null;
+        return {
+            scene: sceneTag(),
+            windows: wins.map(function (w) { return windowBrief(w); })
+        };
+    }
+
+    // The dialogue/map-name windows are already reported as state.message and
+    // state.map; keep them out of the overlay list so custom screens stand out.
+    var MAP_OVERLAY_SKIP = {
+        Window_Message: true,
+        Window_MapName: true,
+        Window_ScrollText: true,
+        Window_ChoiceList: true,
+        Window_Gold: true
+    };
+
+    function mapOverlayInfo() {
+        var s = sceneOf();
+        if (!s || !(s instanceof Scene_Map)) return null;
+        var wins = collectSceneWindows(s, { withMessage: true });
+        var kept = [];
+        for (var i = 0; i < wins.length; i++) {
+            if (MAP_OVERLAY_SKIP[windowDisplayName(wins[i])]) continue;
+            kept.push(wins[i]);
+        }
+        if (!kept.length) return null;
+        return {
+            scene: 'map',
+            windows: kept.map(function (w) { return windowBrief(w); })
+        };
+    }
+
+    // The window that would take the next button press, for input feedback.
+    function cursorWindowBrief() {
+        var s = sceneOf();
+        if (!s) return null;
+        var wins = collectSceneWindows(s, {});
+        var pick = null;
+        for (var i = 0; i < wins.length; i++) {
+            if (wins[i].active) pick = wins[i];
+        }
+        if (!pick) {
+            for (var j = wins.length - 1; j >= 0; j--) {
+                if (!MAP_OVERLAY_SKIP[windowDisplayName(wins[j])]) { pick = wins[j]; break; }
+            }
+        }
+        return pick ? windowBrief(pick, true) : null;
     }
 
     function briefState() {
@@ -789,8 +952,15 @@
             st.balloons = safe(function () {
                 return sceneTag() === 'map' ? balloonsNear(8) : [];
             }, []);
+            // Beds, stairs, doors and other props can have no action commands,
+            // so interactable alone would hide them. nearby classifies every
+            // event by what stepping or speaking is likely to do.
+            st.nearby = safe(function () {
+                return sceneTag() === 'map' ? nearbyEvents(5) : [];
+            }, []);
         }
         st.message = safe(messageInfo, null);
+        if (messageHistory.length) st.message_history = messageHistorySlice(3);
         var w = choiceWindow();
         if (w && (w.active || w.isOpen()) && w._list && w._list.length) {
             st.choices = {
@@ -801,14 +971,14 @@
         }
         st.battle = safe(battleInfo, null);
         var wantUi = st.scene !== 'map' && st.scene !== 'battle' && st.scene !== 'none';
-        // A map event can open an item or number window on top of the map;
-        // expose it like any other menu so the agent can drive it by buttons.
-        if (!wantUi && st.scene === 'map' && st.message &&
-            (st.message.waiting_for === 'item' || st.message.waiting_for === 'number')) {
-            wantUi = true;
-        }
         if (wantUi) {
             st.ui = safe(uiInfo, null);
+        } else if (st.scene === 'map') {
+            // Map events and custom map screens (a world-map destination list
+            // is the usual one) draw their own windows over the map. Without
+            // this the agent sees walk/go_to refuse and no menu to explain it.
+            var overlay = safe(mapOverlayInfo, null);
+            if (overlay) st.ui = overlay;
         }
         if (typeof $gameParty !== 'undefined' && $gameParty && $gameParty.gold) {
             st.party = { gold: $gameParty.gold(), members: safe(partyInfo, []) };
@@ -1010,6 +1180,24 @@
         return out;
     }
 
+    // Escape puts the player back on the map, often on top of the chase event
+    // that started the fight. Report the closest one so the next move can be
+    // away from it in a single call.
+    function nearestThreatInfo() {
+        if (!inMap()) return null;
+        var list = hazardsNear(8);
+        if (!list.length) return null;
+        var t = list[0];
+        return {
+            id: t.id,
+            name: t.name,
+            x: t.x,
+            y: t.y,
+            distance: t.distance,
+            direction: safe(function () { return directionToEvent(t); }, null)
+        };
+    }
+
     // The hazard event the next step would move toward, if any.
     function hazardAhead(radius, dir) {
         if (!inMap()) return null;
@@ -1107,6 +1295,59 @@
         }
         out.sort(function (a, b) { return a.distance - b.distance || a.id - b.id; });
         return out;
+    }
+
+    // One-word summary of what an event is for. Beds and locked doors are
+    // usually zero-command decoration, and "interactable:false" alone hid them
+    // from the agent, which then wandered looking for a trigger.
+    function eventKind(ev) {
+        var data = eventData(ev);
+        var pages = data && data.pages;
+        var transfer = false;
+        var shop = false;
+        if (pages) {
+            for (var p = 0; p < pages.length; p++) {
+                var list = (pages[p] && pages[p].list) || [];
+                for (var i = 0; i < list.length; i++) {
+                    var c = list[i];
+                    if (!c) continue;
+                    if (c.code === 201) transfer = true;
+                    else if (c.code === 302) shop = true;
+                }
+            }
+        }
+        if (shop) return 'shop';
+        if (transfer) return 'transfer';
+        var trigger = eventTrigger(ev);
+        if (trigger === 1 || trigger === 2) return 'touch';
+        if (trigger === 0) return 'action';
+        return 'other';
+    }
+
+    // Compact "what is around me" list for state.nearby, sorted by walking
+    // distance. Cheaper than eventList(radius) when the agent only needs to
+    // know what to try next.
+    function nearbyEvents(limit) {
+        var out = [];
+        if (!inMap()) return out;
+        var px = $gamePlayer.x;
+        var py = $gamePlayer.y;
+        var events = $gameMap.events();
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (!ev || ev._erased) continue;
+            var data = eventData(ev);
+            out.push({
+                event_id: ev.eventId(),
+                name: data && data.name ? String(data.name) : null,
+                x: ev.x,
+                y: ev.y,
+                distance: Math.abs(ev.x - px) + Math.abs(ev.y - py),
+                kind: eventKind(ev)
+            });
+        }
+        out.sort(function (a, b) { return a.distance - b.distance || a.event_id - b.event_id; });
+        return out.slice(0, limit || 5);
     }
 
     // Default output is a compact character grid. Per-cell passability strings
@@ -1471,7 +1712,7 @@
 
     var logItems = [];
     var logSeq = 0;
-    var logWatch = { message: null, choices: null, mapId: null, scene: null, battle: null };
+    var logWatch = { message: null, choices: null, mapId: null, scene: null, battle: null, player: null };
 
     function pushLog(type, data) {
         logSeq++;
@@ -1633,7 +1874,27 @@
                 pushLog('transfer', { from: logWatch.mapId, to: mapId, name: mapDisplayName() });
             }
             logWatch.mapId = mapId;
+            logWatch.player = null;
         }
+        // Walking moves one tile at a time, so sampling every 5 frames never
+        // sees a jump of more than a couple of tiles. A bigger same-map jump is
+        // a cutscene repositioning the player (Transfer Player or set-location),
+        // and any coordinate target the agent held is now stale.
+        var px = $gamePlayer.x;
+        var py = $gamePlayer.y;
+        var prevPos = logWatch.player;
+        if (prevPos && Math.abs(px - prevPos.x) + Math.abs(py - prevPos.y) > 2) {
+            var eventId = safe(function () {
+                var interp = $gameMap._interpreter;
+                return interp && interp._eventId ? interp._eventId() : null;
+            }, null);
+            pushLog('transfer_by_event', {
+                from: { x: prevPos.x, y: prevPos.y },
+                to: { x: px, y: py },
+                event_id: eventId
+            });
+        }
+        logWatch.player = { x: px, y: py };
         watchPartyChanges();
         var msg = safe(messageInfo, null);
         var signature = msg ? JSON.stringify([msg.text, msg.choices, msg.waiting_for]) : null;
@@ -1979,6 +2240,11 @@
     HANDLERS.walk = function (job) {
         var args = job.args;
         if (rejectNonMapScene(job)) return;
+        var blocker = movementBlocker();
+        if (blocker) {
+            finishJob(job, 'error', { blocked_by: blocker }, { reason: 'busy' });
+            return;
+        }
         var dir = typeof args.direction === 'string' ? DIRS[args.direction] : Number(args.direction);
         if (!dir || !DIR_BTN[dir]) {
             finishJob(job, 'error', null, { reason: 'invalid_direction' });
@@ -2033,6 +2299,18 @@
         var avoid = clamp(parseInt(args.avoid_hazard, 10) || 0, 0, 20);
         var blocked = avoid ? hazardBlocker(avoid) : null;
         var start = playerTile();
+        // A choice/message/event window owns the input. Pathfinding would
+        // succeed and the walk would silently stall, so report the window
+        // instead of blaming the map.
+        var blocker = movementBlocker();
+        if (blocker) {
+            finishJob(job, 'error', {
+                from: start,
+                target: { x: tx, y: ty },
+                blocked_by: blocker
+            }, { reason: 'busy' });
+            return;
+        }
         if (start.x === tx && start.y === ty) {
             finishJob(job, 'done', { from: start, to: start, steps: 0, path: [] });
             return;
@@ -2054,9 +2332,24 @@
             finishJob(job, 'error', failEffect, { reason: reason });
             return;
         }
+        // dry_run: hand back the route so the caller can look before walking.
+        // Without this the only way to learn a path was to start moving, and a
+        // failed go_to left the agent poking one tile at a time.
+        if (args.dry_run === true || args.dry_run === 'true') {
+            finishJob(job, 'done', {
+                from: start,
+                target: { x: tx, y: ty },
+                path: path,
+                path_length: path.length,
+                steps_done: 0,
+                dry_run: true
+            });
+            return;
+        }
         job.effect = {
             from: start,
             target: { x: tx, y: ty },
+            path: path,
             path_length: path.length,
             steps_done: 0
         };
@@ -2064,7 +2357,9 @@
         initMover(job, path, {
             avoidHazard: avoid,
             repath: function () {
-                return findPath($gamePlayer.x, $gamePlayer.y, tx, ty, { blocked: blocked });
+                var np = findPath($gamePlayer.x, $gamePlayer.y, tx, ty, { blocked: blocked });
+                if (np && np.length && job.effect) job.effect.path = np;
+                return np;
             }
         });
         job.handler = function (j, t) {
@@ -2352,13 +2647,12 @@
     // map, so the active window and its index have to be part of the signature.
     function uiSignature() {
         var s = sceneOf();
-        if (!s || !s._windowLayer) return '';
-        var kids = s._windowLayer.children || [];
+        if (!s) return '';
+        var wins = collectSceneWindows(s, {});
         var out = [];
-        for (var i = 0; i < kids.length; i++) {
-            var w = kids[i];
-            if (!w || (!w.visible && !w.active)) continue;
-            var cn = (w.constructor && w.constructor.name) || 'Window';
+        for (var i = 0; i < wins.length; i++) {
+            var w = wins[i];
+            var cn = windowDisplayName(w);
             var idx = safe(function () {
                 return typeof w.index === 'function' ? w.index() : -1;
             }, -1);
@@ -2469,6 +2763,10 @@
                 return;
             }
             j.effect.effective = inputSignature() !== sigBefore;
+            // effective alone does not say *what* the press selected. Report
+            // the window that owns the cursor so a destination list or a
+            // custom HUD is readable after each arrow press.
+            j.effect.window = safe(cursorWindowBrief, null);
             finishJob(j, 'done', j.effect);
         };
         job.handler(job, now());
@@ -2529,20 +2827,36 @@
         }
         job.effect = { pages: [], choices: null, stop: null, page_delay_ms: readDelay };
         job.data.startedInBattle = sceneTag() === 'battle';
+        job.data.historyStartTick = tick;
         var lastText = null;
         var pages = 0;
+        // Pages the cutscene advanced on its own between two handler ticks are
+        // in the frame-loop history but never appear in effect.pages; append
+        // them as advanced_text instead of losing the line.
+        var finishAdvance = function (j, status, extra) {
+            var seen = (j.effect.pages || []).slice();
+            var hist = safe(function () { return historySince(j.data.historyStartTick); }, []) || [];
+            var extraText = [];
+            for (var i = 0; i < hist.length; i++) {
+                if (seen.indexOf(hist[i].text) >= 0) continue;
+                seen.push(hist[i].text);
+                extraText.push(hist[i]);
+            }
+            if (extraText.length) j.effect.advanced_text = extraText;
+            finishJob(j, status, j.effect, extra);
+        };
         job.handler = function (j, t) {
             // A message can hand control to a shop or another scene while this
             // job is still running; tapping ok there would confirm purchases.
             var sc = sceneTag();
             if (sc !== 'map' && sc !== 'battle') {
                 j.effect.stop = 'scene_changed';
-                finishJob(j, 'partial', j.effect, { reason: 'left_dialogue_scene' });
+                finishAdvance(j, 'partial', { reason: 'left_dialogue_scene' });
                 return;
             }
             if (j.data.startedInBattle && sc === 'map') {
                 j.effect.stop = 'battle_end';
-                finishJob(j, 'done', j.effect);
+                finishAdvance(j, 'done');
                 return;
             }
             var freshPage = false;
@@ -2552,7 +2866,7 @@
                 j.effect.choices = mi ? mi.choices : null;
                 j.effect.message = mi;
                 if (mi && mi.text && mi.text !== lastText) j.effect.pages.push(mi.text);
-                finishJob(j, 'done', j.effect);
+                finishAdvance(j, 'done');
                 return;
             }
             var mi2 = safe(messageInfo, null);
@@ -2565,7 +2879,7 @@
             if (sc === 'battle') {
                 if (pages >= maxPages) {
                     j.effect.stop = 'max_pages';
-                    finishJob(j, 'partial', j.effect, { reason: 'max_pages' });
+                    finishAdvance(j, 'partial', { reason: 'max_pages' });
                     return;
                 }
                 advanceBattle(j, t);
@@ -2573,17 +2887,17 @@
             }
             if (mi2 && mi2.window_hidden) {
                 j.effect.stop = 'message_hidden';
-                finishJob(j, 'partial', j.effect, { reason: 'message_hidden' });
+                finishAdvance(j, 'partial', { reason: 'message_hidden' });
                 return;
             }
             if (!isMessageBusy() && !isEventRunning()) {
                 j.effect.stop = 'end';
-                finishJob(j, 'done', j.effect);
+                finishAdvance(j, 'done');
                 return;
             }
             if (pages >= maxPages) {
                 j.effect.stop = 'max_pages';
-                finishJob(j, 'partial', j.effect, { reason: 'max_pages' });
+                finishAdvance(j, 'partial', { reason: 'max_pages' });
                 return;
             }
             if (!act(j, freshPage && readDelay > 0 ? readDelay : 140)) return;
@@ -2880,31 +3194,87 @@
         return null;
     }
 
+    // Custom battle plugins sometimes build the actor command list without the
+    // stock `symbol` field, or with translated symbols. Fall back to the
+    // visible label before giving up, so `action:"attack"` keeps working.
+    var COMMAND_LABELS = {
+        attack: ['攻撃', 'たたかう', 'attack'],
+        guard: ['防御', 'guard'],
+        skill: ['スキル', '魔法', '特技', 'skill'],
+        item: ['アイテム', '道具', 'item'],
+        escape: ['逃げる', '戦闘から逃げる', 'escape']
+    };
+
+    function commandMatchesByName(win, action) {
+        var labels = COMMAND_LABELS[action] || [];
+        var list = win._list || [];
+        var out = [];
+        for (var n = 0; n < labels.length; n++) {
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i];
+                if (!it) continue;
+                if (out.indexOf(i) >= 0) continue;
+                if (cleanText(it.name || '').trim() === labels[n]) out.push(i);
+            }
+        }
+        return out;
+    }
+
     // The command the caller asked for, as an index into the visible actor
-    // command window. command_index wins; otherwise action + skill_type_index
-    // pick it by symbol. Skill types appear as one command each, in
-    // addedSkillTypes() order, exactly like Window_ActorCommand builds them.
-    function actorCommandIndex(win, job) {
+    // command window. command_index wins; otherwise symbol wins over label.
+    // Skill types appear as one command each, in addedSkillTypes() order,
+    // exactly like Window_ActorCommand builds them. `symOverride` lets the
+    // auto policy decide per actor instead of per call.
+    function actorCommandIndex(win, job, symOverride) {
         var list = win._list || [];
         var ci = parseInt(job.args.command_index, 10);
         if (!isNaN(ci) && ci >= 0 && ci < list.length) return ci;
-        var sym = 'attack';
-        var act = job.data.battleAction;
-        if (act === 'guard') sym = 'guard';
-        else if (act === 'skill') sym = 'skill';
-        else if (act === 'item') sym = 'item';
-        else if (act === 'escape') sym = 'escape';
+        var sym = symOverride || 'attack';
+        if (!symOverride) {
+            var act = job.data.battleAction;
+            if (act === 'guard') sym = 'guard';
+            else if (act === 'skill') sym = 'skill';
+            else if (act === 'item') sym = 'item';
+            else if (act === 'escape') sym = 'escape';
+        }
         var matches = [];
         for (var i = 0; i < list.length; i++) {
             if (list[i] && list[i].symbol === sym) matches.push(i);
         }
+        if (!matches.length) matches = commandMatchesByName(win, sym);
         if (sym === 'skill' && matches.length) {
             var sti = parseInt(job.args.skill_type_index, 10);
             if (isNaN(sti) || sti < 0 || sti >= matches.length) sti = 0;
             return matches[sti];
         }
         if (matches.length) return matches[0];
-        return windowSymbolIndex(win, 'attack');
+        // Nothing matched by symbol or label. For an attack request, pick the
+        // first enabled command instead of dead-ending on an open, usable
+        // window; the caller can still read what was chosen in effect.issued.
+        // For skill/item/guard, a wrong pick would silently do something else,
+        // so let the caller see no_command.
+        if (sym === 'attack') {
+            for (var k = 0; k < list.length; k++) {
+                if (list[k] && list[k].enabled !== false) return k;
+            }
+        }
+        return -1;
+    }
+
+    // auto policy "skill_first": use a skill while MP allows, otherwise
+    // attack. canUse() already filters occasion and MP, but an explicit MP
+    // check keeps custom actors honest.
+    function autoActionFor(actor) {
+        if (!actor) return 'attack';
+        var skills = safe(function () { return actor.skills(); }, []) || [];
+        for (var i = 0; i < skills.length; i++) {
+            var sk = skills[i];
+            if (!sk) continue;
+            if (!safe(function () { return actor.canUse(sk); }, false)) continue;
+            var cost = safe(function () { return actor.skillMpCost(sk); }, 0) || 0;
+            if (cost <= actor.mp) return 'skill';
+        }
+        return 'attack';
     }
 
     function notePress(job, windowName, patch) {
@@ -2938,6 +3308,13 @@
         d.startActorId = undefined;
     }
 
+    // A tap only reaches the game on a later frame, so close the offending
+    // window first and report the error after the cancel has landed.
+    function requestCancel(job, reason) {
+        VInput.tap('cancel', 60);
+        job.data.cancel = { at: now() + 150, reason: reason };
+    }
+
     function commandAction(job, s) {
         var aw = inputWindow(s);
         if (!aw) {
@@ -2951,6 +3328,17 @@
         }
         var win = aw.win;
         var d = job.data;
+
+        // The open window must belong to the requested action. A failed
+        // skill/item selection leaves its window open; pressing ok there would
+        // execute whatever is under the cursor instead of the new command.
+        // The auto policy may open the skill window even though battleAction
+        // stays 'attack'.
+        var skillWanted = d.battleAction === 'skill' || d.autoPolicy === 'skill_first';
+        if ((aw.name === 'skill' && !skillWanted) || (aw.name === 'item' && d.battleAction !== 'item')) {
+            VInput.tap('cancel', 60);
+            return;
+        }
 
         if (aw.name === 'party_command') {
             var want = d.battleAction === 'escape' ? 'escape' : 'fight';
@@ -2974,7 +3362,11 @@
 
         if (aw.name === 'actor_command') {
             var actor = win._actor || safe(function () { return BattleManager.actor(); }, null);
-            var ci = actorCommandIndex(win, job);
+            var symOverride = null;
+            if (d.autoPolicy === 'skill_first') {
+                symOverride = autoActionFor(actor);
+            }
+            var ci = actorCommandIndex(win, job, symOverride);
             if (ci < 0) {
                 finishJob(job, 'error', job.effect, { reason: 'no_command' });
                 return;
@@ -3008,14 +3400,25 @@
         if (aw.name === 'skill') {
             var skills = win._data || [];
             var si = parseInt(job.args.skill_index, 10);
-            if (isNaN(si) || si < 0) si = 0;
+            if (isNaN(si) || si < 0) {
+                si = 0;
+                // In auto/skill_first, pick the first skill this actor can
+                // actually use instead of blindly taking row 0.
+                if (d.autoPolicy === 'skill_first') {
+                    for (var q = 0; q < skills.length; q++) {
+                        if (safe(function () {
+                            return win._actor ? win._actor.canUse(skills[q]) : false;
+                        }, false)) { si = q; break; }
+                    }
+                }
+            }
             var sk = skills[si];
             if (!sk) {
-                finishJob(job, 'error', job.effect, { reason: 'skill_not_found' });
+                requestCancel(job, 'skill_not_found');
                 return;
             }
             if (win._actor && !safe(function () { return win._actor.canUse(sk); }, false)) {
-                finishJob(job, 'error', job.effect, { reason: 'skill_unusable' });
+                requestCancel(job, 'skill_unusable');
                 return;
             }
             if (navigateWindow(win, si)) {
@@ -3033,7 +3436,7 @@
             if (isNaN(ii) || ii < 0) ii = 0;
             var it = items[ii];
             if (!it) {
-                finishJob(job, 'error', job.effect, { reason: 'item_not_found' });
+                requestCancel(job, 'item_not_found');
                 return;
             }
             if (navigateWindow(win, ii)) {
@@ -3082,8 +3485,21 @@
             finishJob(job, 'error', null, { reason: 'invalid_action' });
             return;
         }
+        var policy = String(job.args.policy || 'attack').toLowerCase();
+        if (policy !== 'attack' && policy !== 'skill_first') {
+            finishJob(job, 'error', null, { reason: 'invalid_policy' });
+            return;
+        }
+        job.data.autoPolicy = auto ? policy : null;
         job.data.battleAction = action;
-        job.effect = { mode: auto ? 'auto' : action, turns: 0, issued: [], ended: false };
+        job.effect = {
+            mode: auto ? 'auto' : action,
+            policy: auto ? policy : null,
+            turn: null,
+            turns: 0,
+            issued: [],
+            ended: false
+        };
         var t0 = now();
         var lastTurn = null;
         job.data.lastProgress = t0;
@@ -3093,13 +3509,37 @@
                 j.effect.ended = true;
                 j.effect.scene_after = sceneTag();
                 flushIssued(j);
+                if (j.data.battleAction === 'escape') {
+                    j.effect.nearest_threat = safe(nearestThreatInfo, null);
+                    if (j.effect.nearest_threat) {
+                        j.effect.hint = 'Escape puts you back on the map next to the ' +
+                            'encounter. Move away from nearest_threat before the touch ' +
+                            'event fires again.';
+                    }
+                }
                 finishJob(j, 'done', j.effect);
                 return;
             }
+            // A failing skill/item selection closes its window first; report
+            // the error once the cancel has landed, so the next battle call
+            // does not inherit a stale sub-window.
+            if (j.data.cancel) {
+                if (t >= j.data.cancel.at) {
+                    var cancelReason = j.data.cancel.reason;
+                    j.data.cancel = null;
+                    finishJob(j, 'error', j.effect, { reason: cancelReason });
+                }
+                return;
+            }
             var turn = safe(function () { return BattleManager._turn; }, null);
-            if (turn !== lastTurn) {
-                if (lastTurn !== null) j.effect.turns++;
-                lastTurn = turn;
+            if (typeof turn === 'number') {
+                j.effect.turn = turn;
+                if (lastTurn === null) {
+                    lastTurn = turn;
+                } else if (turn !== lastTurn) {
+                    j.effect.turns += Math.abs(turn - lastTurn);
+                    lastTurn = turn;
+                }
             }
 
             var inputting = false;
@@ -3108,6 +3548,15 @@
                 inputting = !!(BattleManager.isInputting && BattleManager.isInputting());
                 actor = inputting ? BattleManager.actor() : null;
             } catch (e) {}
+            // Some custom battle systems leave _turn stuck at 0. Count the
+            // action phase ending and input coming back as one round, so
+            // effect.turns still reports something useful.
+            if (inputting && j.data.sawActionPhase) {
+                j.data.rounds = (j.data.rounds || 0) + 1;
+                j.data.sawActionPhase = false;
+            }
+            if (!inputting) j.data.sawActionPhase = true;
+            if ((j.data.rounds || 0) > j.effect.turns) j.effect.turns = j.data.rounds;
             if (inputting) {
                 j.data.lastProgress = t;
                 if (actor && j.data.startActorId === undefined) {
@@ -3934,6 +4383,9 @@
 
     function afterUpdate() {
         tick++;
+        // Sample before updateJobs: a page that a running advance taps away
+        // this frame still gets recorded once.
+        safe(sampleMessageHistory, null);
         var t = now();
         updateJobs(t);
         safe(pollLog, null);
