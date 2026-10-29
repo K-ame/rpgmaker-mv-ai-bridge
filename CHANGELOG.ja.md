@@ -2,6 +2,55 @@
 
 [English](CHANGELOG.md) | [简体中文](CHANGELOG.zh-CN.md) | [日本語](CHANGELOG.ja.md)
 
+## v0.2.0
+
+信頼性と知覚のリリース。ブリッジが本当に準備完了かどうか、タイムアウト時に何が起きたか、そして AI が
+迷わず次の一手を見つけるために必要なゲームデータを直接返します。
+
+### 接続とエラー
+
+- 明示的な接続状態：`disconnected`、`handshaking`、`ready`、`incompatible`。プラグインの `hello` を受けるまで
+  状態を無視し、ハンドシェイクは 5 秒で `4001` により切断、プロトコル不一致は接続を保ったまま明確に拒否して
+  再接続の連打を避けます。`/health` は状態、双方のプロトコルバージョン、プラグインバージョンを返します。
+- `game_not_ready`（接続済みだが互換ハンドシェイク未完了）と `game_not_connected`（接続なし）を区別し、
+  `effect.connection` に理由を載せます。
+- タイムアウトには `action_id` と `effect: {outcome: "unknown", retry_safe, hint}` が付き、遅れて届いた
+  ゲームの応答は `warnings` に一度だけ表示されます。
+- `/health` が `connection.replaced_connections` を集計し、複数の `Game.exe` が `/game` を奪い合っても
+  状態がランダムに飛ぶようには見えません。
+- ループバック以外の `--host` では警告を表示します。
+
+### 知覚
+
+- `list_events` が条件付きイベントページを公開：各ページの `index`、`active`、`trigger` と、待機している
+  スイッチ、変数の下限、セルフスイッチ、アイテム、アクターを名前と現在値付きで返します。
+- 読み取り専用ツール `game_data` を追加：名前付きスイッチ／変数の現在値、アイテム／武器／防具／スキルの
+  ヘルプ文検索、ショップイベントの商品と実際の価格。
+- `observe` に `party.inventory` を追加（重要アイテムが先、通常アイテムが後、合計付き）。
+- `list_events` と `nearby` の転送イベントが `destination`（`map_id`、`x`、`y`、マップ名）を返します。
+  非アクティブページには `page_index` と条件が付き、空の `list_events` は読み込んだイベント数、半径、
+  転送／メッセージ状態を `diagnostic` で説明し、イベントのない地図のようには見せません。
+- `game_data` のショップが MV の実際の形（302 は 1 商品、続く 605 で追加）で解析され、商品のある全ページを
+  その条件付きで返します。
+- `go_to` が目標地点に着くと `events_at_target` / `arrived_event` を返し、「着いたのに反応がない」が OK が
+  必要かもう一歩必要かを説明できます。
+- 画像で描かれたメッセージ本文は `message.image_text`（DTextPicture）、表示中の画像名、
+  `text_source`（`image_text` / `picture`）として公開されます。
+- マップイベント実行中、メッセージ・ログ・`advance` に `context`（`map_id`、`event_id`、`common_event_id`、
+  `command_index`）が付きます。観測できないフィールドは推測せず省略します。`talk_to` のエラーは失敗段階
+  `stage`（`locate` / `trigger` / `move`）を示します。
+
+### 永続化とツール
+
+- `notes.json` はバージョン付きスキーマ、アトミック書き込み、`.bak` バックアップ、破損コピーからの復元を
+  行い、警告を `note` と `/health` で返します。
+- バンドル版 CLI がプラグインを見つけられない問題を修正（単一ファイルには `import.meta.url` がない）。
+  `install` は `plugins.js` を先に検証してからコピーします。
+- `doctor` は `plugins.js` とブリッジのトークンファイルが一致しない場合に失敗し、プラグイン／ブリッジの
+  バージョン不一致では警告します。
+- 全 MCP ツールに読み取り専用／破壊的／冪等の注釈を追加。
+- バージョン確認は `package.json`、CLI、プラグイン、lockfile を照合します。
+
 ## v0.1.2
 
 実機で遊びながら作った最初の版です。ブリッジは WSL、ゲームは Windows、そして実際に戦闘まで行いました。

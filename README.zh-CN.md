@@ -37,10 +37,13 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 - `ws://<host>:<port>/game` 供游戏插件连接（由游戏主动拨出）。
 - `http://<host>:<port>/mcp` 供 MCP 客户端连接（Streamable HTTP，JSON 响应）。
 - `http://<host>:<port>/health` 用于快速检查状态。由于它会返回游戏标题和最近一次观测到的游戏状态（而不只是布尔值），
-  同样需要 Token。`rejected_last_minute` 按来源类别（`game`、`extension`、`web`、`none`）统计最近 60 秒被拒的
-  游戏连接，用来区分 Token 错误和无关的 localhost 探测。
+  同样需要 Token。它还会报告桥接与插件版本、连接状态（`disconnected`、`handshaking`、`ready`、`incompatible`）、
+  笔记文件状态和迟到的执行结果。`rejected_last_minute` 按来源类别（`game`、`extension`、`web`、`none`）统计最近
+  60 秒被拒的游戏连接，用来区分 Token 错误和无关的 localhost 探测。`connection.replaced_connections` 统计游戏连接
+  被更新的连接顶替的次数：同时开多个 `Game.exe` 会让状态来回跳，先看这个计数。
 
-桥接默认只监听回环地址，并要求 Bearer Token。
+桥接默认只监听回环地址，并要求 Bearer Token。`--host` 不是回环地址时，`serve` 会打印警告，因为 MCP 端点会因此
+暴露到网络上。
 
 ## 环境要求
 
@@ -70,6 +73,7 @@ node dist/cli/index.js install "/path/to/MyGame"
 如果 `plugins.js` 不是纯 JSON，会打印手动添加的片段。卸载方法见 [卸载](#卸载)。
 
 运行 `node dist/cli/index.js doctor "/path/to/MyGame"` 可检查 Node 版本、工程结构、插件位置、Token 和会话状态。
+`plugins.js` 里的 Token 与桥接的 Token 文件不一致时会直接报失败（游戏会被拒绝）；插件版本与桥接版本不一致时会给出警告。
 
 ## 运行
 
@@ -118,6 +122,9 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
 | `~/.mv-ai-bridge/session.json` | 运行中的桥接地址、当前 Token、pid 和版本；游戏插件会优先从这里读取 Token。 |
 | `~/.mv-ai-bridge/notes.json` | 代理持久笔记，按游戏标题分组。 |
 
+`notes.json` 采用原子写入，并保留上一份副本 `notes.json.bak`。文件无法读取时会先从备份恢复，同时把损坏文件
+保留为 `notes.json.corrupt-<时间戳>` 以便排查。
+
 设置 `MV_AI_BRIDGE_HOME` 可改变该目录。
 
 ### WSL + Windows
@@ -133,7 +140,8 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
 
 `serve` 启动横幅会打印桥接目录、Token 文件和会话文件的绝对路径，便于确认哪一侧持有它们。`/health` 的
 `rejected_last_minute` 按来源类别（`game`、`extension`、`web`、`none`）统计最近一分钟被拒的连接，用来区分
-「Token 不对」和「浏览器插件的探测」。
+「Token 不对」和「浏览器插件的探测」。`connection.replaced_connections` 统计旧游戏连接被新连接顶替的次数——
+同时运行多个 `Game.exe` 时，这个数字会增长，状态也会跟着跳。
 
 ## 工具
 
@@ -144,6 +152,7 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
   "ok": true,
   "status": "done",
   "action": "walk",
+  "action_id": 42,
   "effect": { "steps_done": 3 },
   "interrupted_by": null,
   "reason": null,
@@ -163,13 +172,18 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
 
 `partial` 和 `interrupted` 是正常的游玩结果，不是工具故障。
 
+`timeout` 不代表动作一定没执行。错误信封会带 `action_id` 和 `effect: {outcome: "unknown", retry_safe, hint}`；
+只有只读动作的 `retry_safe` 为 true。桥接放弃等待后才到达的游戏回执，会在下一次调用的 `warnings` 里提示一次
+（“finished after the bridge stopped waiting”）——重新 `observe` 后再决定是否重试。`reason: "game_not_ready"`
+表示 socket 已连上但插件尚未完成兼容握手（`effect.connection` 说明原因）；`game_not_connected` 则表示没有游戏连接。
+
 | 工具 | 作用 |
 | --- | --- |
-| `observe` | 场景、地图、玩家位置/朝向、当前消息、选项、队伍、战斗、附近事件。`state.nearby` 按距离给出最近的 5 个事件，元素为 `{event_id, name, x, y, distance, kind}`，`kind` 取 `action`（确定键触发）、`touch`（踩上去触发）、`transfer`（门/楼梯）、`shop` 或 `other`；0 指令的床、上锁的门这类装饰事件也会列出，因为它们常常正是要找的触发点。`state.message_history` 保留帧循环看到的最近 3 句台词，包括两次调用之间被过场自动推进的句子。`objective` 原样带回 `note` 里 key 为 `objective` 的值，长流程用它记住当前目标。在地图上还会列出 `threats`（8 格内的战斗事件，含距离、是否移动、是否追击）、`balloons`（8 格内的任务标记：`!` / `?` 气泡，含距离、`balloon` 编号与来源贴图）和 `world_frozen`（`FreezeWhileThinking` 正在冻结地图时为 true）。战斗中的整个输入阶段都会给出 `party_commands`、`actor_commands`、正在选择的角色、技能类型与全部技能（含 MP/TP 消耗和可用性）、战斗道具，以及 `enemy_targets` / `actor_targets`（索引即 `target_index`），不再只报当前聚焦的那个窗口；`skill_window` / `item_window` 本身只在选中该指令后才出现。`battle.log` 是最新的 `Window_BattleLog` 文本。在菜单、商店等非地图场景中，列出每个可见窗口的光标、条目与商店价格；存档界面额外给每个槽位的 `exists` / `timestamp` / `playtime`。在地图上，若打开了自绘覆盖窗口（世界地图目的地列表、HUD 菜单等），会放进 `state.ui`；原生对话框与地图名窗口不重复列出（`state.message` / `state.map` 已经覆盖）。 |
+| `observe` | 场景、地图、玩家位置/朝向、当前消息、选项、队伍（HP/金币，外加 `party.inventory`：关键物品在前，普通物品在后，并给总数；完整清单见 `manage` 的 roster）、战斗、附近事件。`state.nearby` 按距离给出最近的 5 个事件，元素为 `{event_id, name, x, y, distance, kind}`，`kind` 取 `action`（确定键触发）、`touch`（踩上去触发）、`transfer`（门/楼梯）、`shop` 或 `other`；0 指令的床、上锁的门这类装饰事件也会列出，因为它们常常正是要找的触发点。`state.message_history` 保留帧循环看到的最近 3 句台词，包括两次调用之间被过场自动推进的句子。`objective` 原样带回 `note` 里 key 为 `objective` 的值，长流程用它记住当前目标。在地图上还会列出 `threats`（8 格内的战斗事件，含距离、是否移动、是否追击）、`balloons`（8 格内的任务标记：`!` / `?` 气泡，含距离、`balloon` 编号与来源贴图）和 `world_frozen`（`FreezeWhileThinking` 正在冻结地图时为 true）。战斗中的整个输入阶段都会给出 `party_commands`、`actor_commands`、正在选择的角色、技能类型与全部技能（含 MP/TP 消耗和可用性）、战斗道具，以及 `enemy_targets` / `actor_targets`（索引即 `target_index`），不再只报当前聚焦的那个窗口；`skill_window` / `item_window` 本身只在选中该指令后才出现。`battle.log` 是最新的 `Window_BattleLog` 文本。在菜单、商店等非地图场景中，列出每个可见窗口的光标、条目与商店价格；存档界面额外给每个槽位的 `exists` / `timestamp` / `playtime`。在地图上，若打开了自绘覆盖窗口（世界地图目的地列表、HUD 菜单等），会放进 `state.ui`；原生对话框与地图名窗口不重复列出（`state.message` / `state.map` 已经覆盖）。消息打开但没有文字时，说明画面用图片画了正文：`message.image_text` 给出 `DTextPicture` 的字符串（若游戏使用），`message.pictures` 列出可见图片名，`text_source` 为 `image_text` 或 `picture`。 |
 | `look` | 本地地图字符图（`@` 你、`E` 事件、`.` 可走、`#` 挡路），带地图坐标 `origin` 和事件列表。`detail: "full"` 改为返回每格通行性。越界格已裁掉，超过地图的半径会裁到边界并回报实际 `radius`；`overview: true` 一次返回整张地图。非地图场景返回 `bad_scene` 并带当前场景名。 |
-| `list_events` | 附近事件的名字、距离、触发方式、`interact_from`（`adjacent` / `here`）、`action_trigger`、`commands` / `empty`（当前激活页没有指令，按确定键不会有反应）、`hazard`（当前激活页会开战，直接或经公共事件调用）和 `chases`（移动路线会追玩家）。另有 `balloon`（头顶任务标记：1 `!`、2 `?`、0 无，按叠加贴图或当前 balloon 识别）、`page`（激活页序号与总页数）、`note`（事件备注）及 `page_note`（激活页的注释指令，note 型插件的标签常放这里），后两者只在有内容时出现。 |
+| `list_events` | 附近事件的名字、距离、触发方式、`interact_from`（`adjacent` / `here`）、`action_trigger`、`commands` / `empty`（当前激活页没有指令，按确定键不会有反应）、`hazard`（当前激活页会开战，直接或经公共事件调用）和 `chases`（移动路线会追玩家）。另有 `balloon`（头顶任务标记：1 `!`、2 `?`、0 无，按叠加贴图或当前 balloon 识别）、`page`（激活页序号与总页数）、`note`（事件备注）及 `page_note`（激活页的注释指令，note 型插件的标签常放这里），后两者只在有内容时出现。事件存在条件页时，`pages` 会列出各页的 `index`、`active`、`trigger` 及等待条件：开关（`switches`：`id`、`name`、`on`）、变量下限（`variable`：`id`、`name`、`needs`、`value`）、独立开关（`self_switch`：`key`、`on`）、所需道具（`item`：`id`、`name`、`held`）和所需角色（`actor`：`id`、`name`、`in_party`）。NPC 或门为什么没反应、剧情下一步依赖什么，看这里即可；无条件的普通事件保持紧凑。传送事件另有 `destination`：`map_id`、`x`、`y`、地图名 `name`（优先激活页，否则取其他有 201 的页并带 `page_index` 与条件），不必再翻 `Map###.json`。结果为空时，`effect.diagnostic` 会说明地图事件数、半径限制、是否正在传送/消息中，避免把加载中的空结果当成没有事件。 |
 | `walk` | 沿一个方向最多走 N 格。没走满（撞墙或中途被挡）返回 `partial`。`interrupted_by` 区分 `message`（先 advance）、`choice`（先 select）、`event`、`transfer` 和场景名。若消息、选项、事件或传送已经占着画面，调用会直接返回 `busy` 与 `blocked_by`，而不是让行走悄悄卡住。`avoid_hazard: N` 会在踏进战斗事件 N 格范围前停下。非地图场景（菜单、存档等）返回 `bad_scene` 并带当前场景名。 |
-| `go_to` | A* 寻路到指定地块。`effect.path` 是方向码数组（2 下、4 左、6 右、8 上），`path_length` 为步数，客户端可缓存或画出来；`dry_run: true` 只返回路径、不移动。目标格必须可站立——床、柜台、墙不算——失败时返回 `nearest_reachable {x, y, distance, steps}`、`blocked_by`（`wall`、`event`、`one_way_tile`、`avoidance_zone` 等）、`target_passable` 和 `events_at_target`，按这些字段换目标，不要盲目重试。若画面被窗口占着，返回 `busy` 与 `blocked_by`（`choice` / `message` / `event` / `transfer`），不会误报成墙。`avoid_hazard: N` 会绕开战斗事件，下一步靠近时停下。非地图场景返回 `bad_scene`。 |
+| `go_to` | A* 寻路到指定地块。`effect.path` 是方向码数组（2 下、4 左、6 右、8 上），`path_length` 为步数，客户端可缓存或画出来；`dry_run: true` 只返回路径、不移动。目标格必须可站立——床、柜台、墙不算——失败时返回 `nearest_reachable {x, y, distance, steps}`、`blocked_by`（`wall`、`event`、`one_way_tile`、`avoidance_zone` 等）、`target_passable` 和 `events_at_target`，按这些字段换目标，不要盲目重试。成功抵达时，若目标格上有事件，`effect.events_at_target` 会列出它们（触发方式、页、`interact_from`，门还带 `destination`），`effect.arrived_event` 是第一个；按确定键触发的事件落地后仍需按 OK，踩踏触发的事件仍需走动，因此「到了却没反应」可以直接解释。若画面被窗口占着，返回 `busy` 与 `blocked_by`（`choice` / `message` / `event` / `transfer`），不会误报成墙。`avoid_hazard: N` 会绕开战斗事件，下一步靠近时停下。非地图场景返回 `bad_scene`。 |
 | `talk_to` | 用确定键触发地图事件：从相邻格面向它，对 `interact_from: "here"` 的事件先走到它格子上再按；柜台后的 NPC（`interact_from: "across_counter"`）会站到柜台前、面向柜台再按。错误会区分不可达、非确定键页面和空占位页；非地图场景返回 `bad_scene`。 |
 | `interact` | 按一次确定键。 |
 | `advance` | 快进打字、翻页，遇到选项或事件结束时停下。**先读 `effect.pages`**：它是本次调用期间出现过的全部页，事件一次跑完时可能就是整段对话（若这次只推进了已看过的行，也可能为空）。`effect.advanced_text` 只是兜底：帧循环看到、但 `pages` 漏掉的句子，通常不出现。`page_delay_ms` 只作用于消息窗口，战斗日志按游戏自身节奏播放。战斗里**绝不出招**：指令/目标窗口打开时返回 `needs_command`；`battleEnd` 阶段按确定键推进胜利/经验窗口直到回到地图（`stop: "battle_end"`）。 |
@@ -182,7 +196,8 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
 | `checkpoint` | 保存、读取、列出、删除内存快照。绝不触碰磁盘存档。 |
 | `input` | 原始引擎按键（`button`、`hold_ms`），可精确控制按住时长。`effect.effective` 说明这次按键是否真的产生了变化（包括自绘窗口里的光标移动）；`effect.window` 给出按键后光标所在的窗口、`index` 与 `selected`。菜单被消息/事件挡住或场景禁用时返回 `reason: "input_swallowed"` 与 `blocked_by`。存档界面未选槽时按 `ok` 返回 `save_slot_not_chosen`。 |
 | `log` | 轮询事件日志：消息、选项、传送、场景切换、战斗开始/结束，以及队员与敌人的状态和装备变化。台词中出现「〜が必要」「〜しなければ」「〜すると良い」这类要求时会额外记一条 `hint`。过场在同一张地图内直接改动玩家位置时，会记一条 `transfer_by_event`（含 `from`、`to` 与正在执行的事件 `event_id`），旧坐标目标因此可见地失效。 |
-| `note` | 桥接机器上的持久笔记，按游戏标题分组。`key: "objective"` 的值会出现在每次 `observe` 的 `objective` 字段里。例：`{"action":"set","key":"objective","text":"凑够 2000G 登记公会；出城前先买武器"}`。 |
+| `game_data` | 只读的数据库与进度查询。`kind: "switches"` / `"variables"` 默认只列有名字的条目（`id`、`name`、当前值），`all: true` 连无名条目一起给，`ids` 可指定编号；有名字的开关/变量通常就是任务与剧情状态。`kind: "items"` / `"weapons"` / `"armors"` / `"skills"` 用 `ids` 精确读取（含帮助文本），或用 `query` 搜索名称、描述与备注（帮助文本常直接写用途或条件）；两者都不给时返回紧凑的 id/name 索引。`kind: "shop"` 配合 `event_id` 列出该商店事件的商品：类别、id、名称和实际价格。会同时读取 `302` 与后续 `605` 商品，并返回所有带商品的页（`pages[]`：`page_index`、`active`、`trigger`、`conditions` 与该页商品），条件页的货架也能看到；`effect.goods` 取激活页的商品（若它有），否则取第一个有商品的页；`effect.page` 与 `effect.source`（`active_page` / `other_page`）说明来自哪一页。通过脚本而非商店指令设置的商品不可见。 |
+| `note` | 桥接机器上的持久笔记，按游戏标题分组。写入是原子的，并保留上一份副本；文件损坏时会在 `warnings` 里报告、保留损坏副本，并尽可能从备份恢复。`key: "objective"` 的值会出现在每次 `observe` 的 `objective` 字段里。例：`{"action":"set","key":"objective","text":"凑够 2000G 登记公会；出城前先买武器"}`。 |
 
 ### 错误原因
 
@@ -190,6 +205,9 @@ stdio MCP 仅在显式传入 `--stdio` 时启用，绝不会根据 stdin 推断�
 
 | `reason` | 含义 |
 | --- | --- |
+| `game_not_connected` | 没有游戏插件的 socket 连接。 |
+| `game_not_ready` | socket 已连上，但握手缺失、尚未完成或不兼容。`effect.connection` 给出状态、协议版本与插件版本。 |
+| `timeout` | 超时未收到回执。动作可能已经执行：读 `action_id`、`effect.outcome`（`unknown`）和 `effect.retry_safe`，先重新 `observe` 再决定是否重试。迟到的回执会在下一次 `warnings` 里出现一次。 |
 | `bad_scene` | 该动作只在地图（或其他特定场景）可用，当前场景不同。`effect.scene` 给出场景名。 |
 | `not_on_map` | 场景看起来是地图，但读不到可用的地图数据，通常是 `Map###.json` 缺失或不完整。 |
 | `needs_command` | 战斗中指令或目标窗口正在等待时调用了 `advance`；先发一条 `battle` 指令。 |

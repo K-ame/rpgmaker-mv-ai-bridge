@@ -2,7 +2,9 @@ import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { BridgeCore } from './core.js';
+import { VERSION } from './cli/constants.js';
 import { createMcpServer } from './mcp.js';
+import { PROTOCOL_VERSION } from './protocol.js';
 
 export interface ServeOptions {
   host: string;
@@ -103,7 +105,14 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
         json(res, 401, { error: 'unauthorized' });
         return;
       }
-      json(res, 200, { ok: true, ...core.session.summary(), rejected_last_minute: rejectedLastMinute() });
+      json(res, 200, {
+        ok: true,
+        version: VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        ...core.session.summary(),
+        notes: core.notes.status(),
+        rejected_last_minute: rejectedLastMinute(),
+      });
       return;
     }
 
@@ -111,8 +120,8 @@ export function startServer(options: ServeOptions): Promise<BridgeServer> {
       res.statusCode = 200;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end(
-        'mv-ai-bridge\n' +
-          `game connected: ${core.session.connected ? 'yes' : 'no'}\n` +
+        'mv-ai-bridge ' + VERSION + '\n' +
+          `game: ${core.session.connection}\n` +
           `MCP endpoint: http://${host}:${port}/mcp\n` +
           'Add it as a Streamable HTTP MCP server with the token from ~/.mv-ai-bridge/session.json.\n',
       );

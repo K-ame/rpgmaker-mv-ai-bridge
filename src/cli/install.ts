@@ -4,15 +4,33 @@ import { fileURLToPath } from 'node:url';
 import { findProject, getOrCreateToken, PluginEntry, ProjectLayout, readPlugins, writePlugins } from './files.js';
 import { PLUGIN_NAME } from './constants.js';
 
-function packageRoot(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, '..', '..');
+function scriptDir(): string | null {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    // The single-file CJS bundle has no import.meta.url.
+    return null;
+  }
 }
 
+// The plugin ships next to dist/ in the package, and next to the bundle in the
+// release zip, so look in every layout instead of assuming one.
 export function pluginSource(): string {
-  const local = path.join(packageRoot(), 'plugin', 'MV_AI_Bridge.js');
-  if (fs.existsSync(local)) return local;
-  throw new Error(`plugin source not found at ${local}`);
+  const here = scriptDir();
+  const dirs = [
+    here ? path.resolve(here, '..', '..') : null,
+    path.dirname(process.argv[1] || ''),
+    process.cwd(),
+    path.dirname(process.execPath),
+  ].filter((dir): dir is string => !!dir);
+  const tried: string[] = [];
+  for (const dir of dirs) {
+    const candidate = path.join(dir, 'plugin', 'MV_AI_Bridge.js');
+    if (tried.includes(candidate)) continue;
+    tried.push(candidate);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`plugin source not found; looked in:\n  ${tried.join('\n  ')}`);
 }
 
 export interface InstallResult {
@@ -29,11 +47,13 @@ export function installPlugin(gameDir: string, port: number, debug = false): Ins
       `Could not find www/js/plugins.js under ${gameDir}. Pass the game folder that contains Game.exe and www/.`,
     );
   }
+  // Validate plugins.js before touching the game directory, so a malformed
+  // list does not leave a copied plugin behind without a registration.
+  const entries = readPlugins(layout.pluginsJs);
   fs.mkdirSync(layout.pluginsDir, { recursive: true });
   const dest = path.join(layout.pluginsDir, `${PLUGIN_NAME}.js`);
   fs.copyFileSync(pluginSource(), dest);
 
-  const entries = readPlugins(layout.pluginsJs);
   const filtered = entries.filter((e) => e && e.name !== PLUGIN_NAME);
   const entry: PluginEntry = {
     name: PLUGIN_NAME,

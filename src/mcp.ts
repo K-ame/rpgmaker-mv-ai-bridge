@@ -23,13 +23,23 @@ function result(env: Envelope) {
 }
 
 const ENVELOPE_NOTE =
-  'Every action returns the same envelope: {ok, status, action, effect, interrupted_by, reason, tick, state, new_log, warnings}. ' +
+  'Every action returns the same envelope: {ok, status, action, action_id, effect, interrupted_by, reason, tick, state, new_log, warnings}. ' +
   'status is "done" (goal reached or the action naturally stopped), "partial" (budget ran out or movement was blocked), ' +
   '"interrupted" (a message, choice, battle, transfer or scene change took control), or "error". ' +
-  'Interrupted and partial are normal gameplay outcomes, not tool failures. Read state and new_log before deciding what to do next.';
+  'Interrupted and partial are normal gameplay outcomes, not tool failures. Read state and new_log before deciding what to do next. ' +
+  'reason "game_not_ready" means the socket is connected but the plugin has not completed a compatible handshake ' +
+  '(see effect.connection); "game_not_connected" means no plugin socket at all. ' +
+  'reason "timeout" is not proof the action did not run: effect carries action_id, outcome "unknown" and retry_safe. ' +
+  'A game result that arrives after the bridge gave up is reported once in warnings of the next call.';
 
 export function createMcpServer(core: BridgeCore): McpServer {
   const server = new McpServer({ name: 'mv-ai-bridge', version: VERSION });
+
+  // Every tool declares a full annotation set, so clients can classify tools
+  // without guessing from names. wait/note mutate via time or persistence.
+  const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const MUTATING = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+  const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 
   const register = (
     name: string,
@@ -38,27 +48,32 @@ export function createMcpServer(core: BridgeCore): McpServer {
     inputSchema: Record<string, z.ZodTypeAny>,
     annotations: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean },
   ) => {
-    server.registerTool(name, { title, description, inputSchema }, async (args: Record<string, unknown>) =>
+    server.registerTool(name, { title, description, inputSchema, annotations }, async (args: Record<string, unknown>) =>
       result(await core.run(name, args || {})),
     );
-    void annotations;
   };
 
   register(
     'observe',
     'Observe',
     'Read the current structured game state: scene, map, player tile and facing, open message text, choice window, ' +
-      'party HP/gold, battle status, and nearby events. state.nearby lists the five closest events with distance and ' +
+      'party HP/gold, a compact inventory summary (state.party.inventory: key_items first, then items, with totals; ' +
+      'manage roster has the complete lists), battle status, and nearby events. state.nearby lists the five closest events with distance and ' +
       'kind ("action" responds to the action button, "touch" triggers when stepped on, "transfer" is a door or stairs, ' +
       '"shop" opens a shop), including decorative zero-command events such as beds, so a trigger is not hidden just ' +
       'because it has no commands. state.message_history keeps the last three lines the frame loop saw, including ' +
-      'lines of a cutscene that auto-advanced between calls. "objective" echoes the note you stored under key "objective" ' +
+      'lines of a cutscene that auto-advanced between calls, each with the context it was seen in. "objective" echoes the note you stored under key "objective" ' +
       '(set it with note {"action":"set","key":"objective","text":"..."}): keep a one-line current goal there and read ' +
       'it back on every observe so you do not drift into reacting only to what is on screen. "threats" lists nearby ' +
       'battle-capable events (roaming monsters) with distance, whether they move, and whether their move route chases ' +
       'the player, so you can engage or keep clear. "balloons" lists nearby quest markers ("!" / "?" overlays) with ' +
       'distance, balloon id and source image, so the first call already shows where the story continues. ' +
       'state.world_frozen is true while the optional FreezeWhileThinking mode is holding the map still between calls. ' +
+      'state.message.context appears while a map event is running and reports map_id, event_id, common_event_id and ' +
+      'command_index when the runtime can supply them (fields are omitted, never guessed, for plugin-driven dialogue). ' +
+      'When a message is open but text is empty, the scene draws it as an image: message.image_text carries the ' +
+      'DTextPicture string when the game uses it, message.pictures lists visible picture names, and text_source is ' +
+      '"image_text" or "picture" so unreadable text is explained instead of looking like a blank message. ' +
       'In battle it exposes party_commands, actor_commands, the inputting actor, that actor\'s skill types with every ' +
       'skill (MP/TP cost and usable flag included), battle items, and enemy_targets/actor_targets with the indexes ' +
       'target_index expects — all available throughout the input phase, even when the plugin keeps only one window ' +
@@ -75,7 +90,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       radius,
       detail: z.enum(['brief', 'full']).optional().describe('"full" adds inventory, actor states and equipment-level detail.'),
     },
-    { readOnlyHint: true, openWorldHint: false },
+    READ_ONLY,
   );
 
   register(
@@ -94,7 +109,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       overview: z.boolean().optional().describe('Return the entire map, ignoring radius.'),
       detail: z.enum(['brief', 'full']).optional().describe('"full" returns per-cell passability objects instead of the character map.'),
     },
-    { readOnlyHint: true, openWorldHint: false },
+    READ_ONLY,
   );
 
   register(
@@ -107,13 +122,53 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'balloon is the quest marker id shown above the event (1 "!", 2 "?", 0 none), detected from the overlay charset ' +
       'or a live balloon; page gives the active page index and total, note is the event note, and page_note is the ' +
       'comment commands of the active page (where note-driven plugins keep their tags) — all only present when used. ' +
-      'hazard=true means the ' +
+      'pages lists the conditional page rules when the event has any: index, active, trigger, and conditions for ' +
+      'switches (id, name, on), a variable minimum (id, name, needs, value), self switch (key, on), a required item ' +
+      '(id, name, held) and a required actor (id, name, in_party). This answers "why is this NPC/door not responding" ' +
+      'and what the next story state depends on. destination on a transfer event resolves its 201 command to ' +
+      'map_id/x/y/name (active page first, otherwise another page with page_index and conditions), so a door does not ' +
+      'need map JSON to inspect. If the result is empty, effect.diagnostic says whether the map has no events, the ' +
+      'radius excluded them, or a transfer/message is in progress. hazard=true means the ' +
       'event\'s active page can start a battle, either directly or through a common event it calls, which is how ' +
       'roaming monsters are usually implemented; treat those events as dangerous. chases=true means the event moves ' +
       'toward the player. Erased (spent) events are omitted. ' +
       ENVELOPE_NOTE,
     { radius },
-    { readOnlyHint: true, openWorldHint: false },
+    READ_ONLY,
+  );
+
+  register(
+    'game_data',
+    'Game data',
+    'Read the game database and progress flags without changing anything. ' +
+      'kind "switches" or "variables" lists named entries only by default (id, name, current value); pass all:true to ' +
+      'include unnamed ones and ids to select specific ids. Named switches and variables usually hold quest and story ' +
+      'state, so this shows what the game is waiting for. ' +
+      'kind "items", "weapons", "armors" or "skills" looks up database entries: pass ids for exact entries with help ' +
+      'text, or query to search names, descriptions and notes (help text often states a usage or a requirement). ' +
+      'With neither, it returns a compact id/name index (limit defaults to 120). ' +
+      'kind "shop" needs event_id and lists that shop event\'s goods with kind, id, name and effective price. It ' +
+      'reads both the 302 goods and the 605 additions, and returns every page that has goods (pages[] with ' +
+      'page_index, active, trigger, conditions and its own goods), so a condition-gated shop page is visible too; ' +
+      'effect.goods mirrors the active page when it has any. Goods defined by script rather than the shop command ' +
+      'are not visible. ' +
+      'Read-only: no game state is changed. ' +
+      ENVELOPE_NOTE,
+    {
+      kind: z
+        .enum(['switches', 'variables', 'items', 'weapons', 'armors', 'skills', 'shop'])
+        .describe('What to read.'),
+      ids: z
+        .array(z.number().int().min(1))
+        .max(100)
+        .optional()
+        .describe('Specific switch/variable/database ids to read.'),
+      query: z.string().optional().describe('Case-insensitive search over names, descriptions and notes.'),
+      all: z.boolean().optional().describe('Include unnamed switches/variables. Default false.'),
+      event_id: z.number().int().min(1).optional().describe('Shop event id for kind "shop".'),
+      limit: z.number().int().min(1).max(300).optional().describe('Maximum entries. Defaults: 300 flags, 120 index, 20 query.'),
+    },
+    READ_ONLY,
   );
 
   register(
@@ -142,7 +197,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
         .describe('Safety margin in tiles: do not step closer than this to a battle event. Default 0 (no avoidance).'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -155,7 +210,10 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'early at the next decision point and returns "partial" with the remaining position if it is blocked mid-route. ' +
       'When the target cannot be reached at all, the result is an error whose effect carries nearest_reachable ' +
       '{x,y,distance,steps}, blocked_by ("wall" | "event" | "one_way_tile" | "avoidance_zone" | ...), the target tile ' +
-      'passability and events_at_target, so you can pick a reachable goal instead of retrying blindly. Set ' +
+      'passability and events_at_target, so you can pick a reachable goal instead of retrying blindly. On success, ' +
+      'if the goal tile holds events, effect.events_at_target lists them (trigger, page, interact_from, destination ' +
+      'for doors) and effect.arrived_event is the first; an action-trigger event landed on still needs OK, and a ' +
+      'player-touch event needs a step, so "arrived but nothing happened" is explainable. Set ' +
       'avoid_hazard to route around cells within N tiles of roaming ' +
       'monsters and to stop before stepping toward one; the result then carries reason "threat_nearby" and ' +
       'effect.threat. The goal tile itself is exempt, so a deliberate approach still works. If a message, choice, ' +
@@ -179,7 +237,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
         .describe('Safety margin in tiles: path around and stop short of battle events. Default 0 (no avoidance).'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -190,7 +248,10 @@ export function createMcpServer(core: BridgeCore): McpServer {
       '(interact_from "across_counter") are reached by standing in front of the counter and facing it, as MV allows. ' +
       'Use an event id from list_events, an exact tile, or omit both to pick the nearest interactable event. Errors ' +
       'distinguish unreachable tiles, events that do not respond to the action button at all, and pages that are empty ' +
-      'placeholders. Outside the map scene it fails with reason "bad_scene" and the current scene name. ' +
+      'placeholders. effect.stage says how far the attempt got: "locate" (target not found or not plannable), ' +
+      '"trigger" (page does not answer the action button), "move" (could not reach the tile, with blocked_by), ' +
+      '"start" (event moved or its page was erased before the press), "verify" (pressed, nothing ran: reason no_response). ' +
+      'A success ends at stage "started". Outside the map scene it fails with reason "bad_scene" and the current scene name. ' +
       'If the event starts a message or choice, the call stops there and returns the text. ' +
       ENVELOPE_NOTE,
     {
@@ -199,7 +260,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       y: z.number().int().optional().describe('Event tile y (alternative to event_id).'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -209,7 +270,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'option when you already know what is in front of the player. ' +
       ENVELOPE_NOTE,
     { timeout_ms: timeout },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -221,7 +282,9 @@ export function createMcpServer(core: BridgeCore): McpServer {
       'timing. effect.pages is the list to read: every page that appeared while the call ran, which for a dialogue ' +
       'event that completes in one call can be the whole conversation (it may also be empty when the call only ' +
       'advanced an already-seen line). effect.advanced_text is a fallback that only appears when the frame loop saw ' +
-      'a line that pages missed; it is normally absent, so do not read it first. state.message_history keeps the ' +
+      'a line that pages missed; it is normally absent, so do not read it first and its entries carry the same context. ' +
+      'effect.context follows the conversation with map_id/event_id/command_index when the runtime can report them, so ' +
+      'two consecutive events with similar text do not get mixed up. state.message_history keeps the ' +
       'last few lines and state.battle.log the last battle-log lines afterwards. ' +
       'Use select afterward when a choice appears. ' +
       'In battle it only pushes log/result windows: while a command or target window is open it refuses with reason ' +
@@ -238,7 +301,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
         .describe('How long each message page stays on screen. Default: the plugin ReadDelay (2000 ms).'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -256,7 +319,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       label: z.string().optional().describe('Exact option text, or a unique substring.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -265,7 +328,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'Press the cancel button once. Use it to close menus, leave a submenu, or back out of an accidental dialog. ' +
       ENVELOPE_NOTE,
     { timeout_ms: timeout },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -320,7 +383,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       target_index: z.number().int().min(0).optional().describe('Target list index. Default 0.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -350,7 +413,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       target_actor_id: z.number().int().optional().describe('Item target for "use_item". Default first party member.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -362,7 +425,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       action: z.enum(['new', 'continue', 'options', 'back']).describe('What to do on the title screen.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -376,7 +439,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       ms: z.number().int().min(0).max(120000).optional().describe('Delay for until="ms".'),
       timeout_ms: timeout,
     },
-    { readOnlyHint: false, openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -393,7 +456,9 @@ export function createMcpServer(core: BridgeCore): McpServer {
       id: z.string().optional().describe('Checkpoint id. "load" defaults to the most recent one.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    // "load" replaces the runtime state wholesale and "delete" drops a
+    // snapshot, so the tool as a whole is not safe to treat as read-only.
+    DESTRUCTIVE,
   );
 
   register(
@@ -416,7 +481,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       hold_ms: z.number().int().min(16).max(3000).optional().describe('How long to hold. Default 60 ms.'),
       timeout_ms: timeout,
     },
-    { openWorldHint: false },
+    MUTATING,
   );
 
   register(
@@ -431,7 +496,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       since: z.number().int().min(0).optional().describe('Return only entries with seq greater than this.'),
       limit: z.number().int().min(1).max(500).optional().describe('Maximum entries, newest last. Default 50.'),
     },
-    { readOnlyHint: true, openWorldHint: false },
+    READ_ONLY,
   );
 
   register(
@@ -439,6 +504,8 @@ export function createMcpServer(core: BridgeCore): McpServer {
     'Notes',
     'Persistent notes for the agent, stored on the bridge machine and keyed by game title. They survive context resets ' +
       'and game restarts. Use them for plans, discovered routes, NPC locations and puzzles. ' +
+      'Writes are atomic and a previous copy is kept; if the file is unreadable the result warnings say so, a corrupt ' +
+      'copy is preserved, and the backup is restored when possible. ' +
       'The key "objective" is special: its value is echoed as observe.effect.objective on every observation. ' +
       'In long games keep a one-line goal there and restate it as you make progress. ' +
       'Actions: set (key + value or text), get (key), list, delete (key). ' +
@@ -449,7 +516,7 @@ export function createMcpServer(core: BridgeCore): McpServer {
       value: z.unknown().optional().describe('Any JSON value to store.'),
       text: z.string().optional().describe('Alias for value; handy for plain string notes such as the objective.'),
     },
-    { readOnlyHint: false, openWorldHint: false },
+    MUTATING,
   );
 
   return server;

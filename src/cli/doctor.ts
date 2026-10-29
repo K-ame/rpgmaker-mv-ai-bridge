@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { DEFAULT_HOST, DEFAULT_PORT, PLUGIN_NAME } from './constants.js';
+import { DEFAULT_HOST, DEFAULT_PORT, PLUGIN_NAME, VERSION } from './constants.js';
 import { findProject, isProcessRunning, readPlugins, readSession, TOKEN_FILE } from './files.js';
 
 export interface CheckLine {
@@ -44,6 +44,22 @@ export async function doctor(gameDir?: string): Promise<CheckLine[]> {
         ? `Plugin file installed: ${dest}`
         : `Plugin file missing: ${dest} (run \`mv-ai-bridge install "${dir}"\`)`,
     });
+    if (fs.existsSync(dest)) {
+      let installed: string | null = null;
+      try {
+        installed = fs.readFileSync(dest, 'utf8').match(/var VERSION = '([^']+)'/)?.[1] ?? null;
+      } catch {
+        /* reported as missing above */
+      }
+      if (installed && installed !== VERSION) {
+        lines.push({
+          level: 'warn',
+          text: `Installed plugin is ${installed}, bridge is ${VERSION}. Re-run install to update both sides of the protocol.`,
+        });
+      } else if (installed) {
+        lines.push({ level: 'ok', text: `Plugin version ${installed} matches the bridge` });
+      }
+    }
     try {
       const entries = readPlugins(layout.pluginsJs);
       const index = entries.findIndex((e) => e && e.name === PLUGIN_NAME);
@@ -60,6 +76,31 @@ export async function doctor(gameDir?: string): Promise<CheckLine[]> {
             level: 'warn',
             text: `${PLUGIN_NAME} is not the last plugin. It still works, but loading last is the tested arrangement.`,
           });
+        }
+        const configured = typeof entry.parameters?.Token === 'string' ? entry.parameters.Token : '';
+        let onDisk = '';
+        try {
+          onDisk = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+        } catch {
+          /* not created yet */
+        }
+        if (!configured) {
+          lines.push({
+            level: 'warn',
+            text: 'plugins.js has no Token parameter; the plugin falls back to ~/.mv-ai-bridge on the game side, which breaks when the game and the bridge do not share a home directory.',
+          });
+        } else if (!onDisk) {
+          lines.push({
+            level: 'warn',
+            text: 'plugins.js has a Token, but the bridge token file does not exist yet (start `serve` once, then re-run install if they differ).',
+          });
+        } else if (configured !== onDisk) {
+          lines.push({
+            level: 'fail',
+            text: 'plugins.js Token does not match the bridge token file; the game would be rejected. Re-run `mv-ai-bridge install <gameDir>`.',
+          });
+        } else {
+          lines.push({ level: 'ok', text: 'plugins.js Token matches the bridge token file' });
         }
       }
     } catch (err) {

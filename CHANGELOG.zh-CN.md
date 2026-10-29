@@ -2,6 +2,37 @@
 
 [English](CHANGELOG.md) | [简体中文](CHANGELOG.zh-CN.md) | [日本語](CHANGELOG.ja.md)
 
+## v0.2.0
+
+可靠性与感知版本：桥接现在能说清自己是否真正就绪、调用超时时到底发生了什么，并直接把 AI 找下一步所需的游戏数据摆出来。
+
+### 连接与错误
+
+- 显式连接状态：`disconnected`、`handshaking`、`ready`、`incompatible`。收到插件的 `hello` 前忽略状态；握手 5 秒超时以 `4001` 关闭，协议不匹配则保持连接并给出明确拒绝，避免反复重连。`/health` 报告状态、双方协议版本和插件版本。
+- `game_not_ready`（socket 已连但握手不兼容）与 `game_not_connected`（没有连接）分开，`effect.connection` 说明原因。
+- 超时信封带 `action_id` 和 `effect: {outcome: "unknown", retry_safe, hint}`；迟到的游戏回执会在 `warnings` 里出现一次，避免盲目重放。
+- `/health` 统计 `connection.replaced_connections`，同时开多个 `Game.exe` 抢夺 `/game` 时不再表现成状态乱跳。
+- `--host` 不是回环地址时打印警告。
+
+### 感知
+
+- `list_events` 暴露条件事件页：每页的 `index`、`active`、`trigger`，以及等待的开关、变量下限、独立开关、道具或角色，全部解析成名称和当前值。
+- 新增只读工具 `game_data`：有名字的开关/变量及当前值、道具/武器/防具/技能的帮助文本查询、商店事件的商品与实际价格。
+- `observe` 增加 `party.inventory`（关键物品在前，普通物品在后，并给总数）。
+- `list_events` 与 `nearby` 的传送事件带 `destination`（`map_id`、`x`、`y`、地图名；非激活页附 `page_index` 与条件）；空结果用 `diagnostic` 说明读取到的事件数、半径和传送/消息状态，不再像一张没有事件的地图。
+- `game_data` 的商店按 MV 真实指令格式解析（每个 `302` 一件商品，后续 `605` 追加），并返回所有带商品的页及其条件。
+- `go_to` 成功抵达时返回 `events_at_target` / `arrived_event`，说明「到了却没反应」是还需要按 OK 还是再走一步。
+- 消息正文用图片绘制时，暴露 `message.image_text`（DTextPicture）、可见图片名和 `text_source`（`image_text` / `picture`）。
+- 地图事件运行期间，消息、日志与 `advance` 带 `context`（`map_id`、`event_id`、`common_event_id`、`command_index`），无法观测的字段直接省略而不是猜测；`talk_to` 错误会标明失败阶段 `stage`（`locate` / `trigger` / `move`）。
+
+### 持久化与工具链
+
+- `notes.json` 使用带版本的 schema、原子写入、`.bak` 备份和损坏副本恢复；`note` 与 `/health` 会返回警告。
+- 修复打包版 CLI 找不到插件的问题（单文件包没有 `import.meta.url`）；`install` 先校验 `plugins.js` 再复制，不会留下半个安装。
+- `doctor` 在 `plugins.js` 与桥接 token 文件不一致时直接失败，在插件/桥接版本不一致时警告。
+- 所有 MCP 工具补全只读/破坏性/幂等注解。
+- 版本检查覆盖 `package.json`、CLI、插件与 lockfile。
+
 ## v0.1.2
 
 第一个经过实机游玩的版本：桥跑在 WSL、游戏跑在 Windows，真的打了一场。

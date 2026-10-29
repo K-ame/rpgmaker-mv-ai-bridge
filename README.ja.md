@@ -39,10 +39,15 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 - `ws://<host>:<port>/game` — ゲーム側プラグイン用（ゲームからブリッジへ接続します）。
 - `http://<host>:<port>/mcp` — MCP クライアント用（Streamable HTTP、JSON 応答）。
 - `http://<host>:<port>/health` — 状態確認用。ゲームタイトルと最後に観測したゲーム状態を返すため、
-  真偽値だけの応答ではなく、トークンが必要です。`rejected_last_minute` は直近 60 秒に拒否されたゲーム接続を
-  発生元の種類（`game`、`extension`、`web`、`none`）別に数え、トークン不一致と無関係な localhost 探索を区別します。
+  真偽値だけの応答ではなく、トークンが必要です。ブリッジとプラグインのバージョン、接続状態
+  （`disconnected`、`handshaking`、`ready`、`incompatible`）、ノートファイルの状態、遅れて届いた実行結果も
+  返します。`rejected_last_minute` は直近 60 秒に拒否されたゲーム接続を発生元の種類（`game`、`extension`、
+  `web`、`none`）別に数え、トークン不一致と無関係な localhost 探索を区別します。
+  `connection.replaced_connections` はゲーム接続が新しい接続に置き換えられた回数です。複数の `Game.exe` が
+  同じ `/game` を奪い合うと状態が飛ぶので、まずこの数字を見てください。
 
-ブリッジは既定でループバックにのみバインドし、Bearer トークンを要求します。
+ブリッジは既定でループバックにのみバインドし、Bearer トークンを要求します。`--host` がループバックでない場合、
+MCP エンドポイントがネットワークから到達可能になるため `serve` は警告を表示します。
 
 ## 動作環境
 
@@ -73,7 +78,9 @@ node dist/cli/index.js install "/path/to/MyGame"
 手動追加用のスニペットを表示します。元に戻す方法は[アンインストール](#アンインストール)を参照してください。
 
 `node dist/cli/index.js doctor "/path/to/MyGame"` を実行すると、Node のバージョン、プロジェクト構成、
-プラグインの配置、トークン、セッション状態を確認できます。
+プラグインの配置、トークン、セッション状態を確認できます。`plugins.js` のトークンがブリッジのトークン
+ファイルと一致しない場合は失敗します（ゲームが拒否されるため）。プラグインとブリッジのバージョンが
+異なる場合は警告します。
 
 ## 起動
 
@@ -124,6 +131,9 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
 | `~/.mv-ai-bridge/session.json` | 実行中のブリッジのアドレス、現在のトークン、pid、バージョン。ゲーム側プラグインはここからトークンを優先的に読みます。 |
 | `~/.mv-ai-bridge/notes.json` | エージェント用の永続ノート。ゲームタイトルごとに管理。 |
 
+`notes.json` はアトミックに書き込まれ、直前のコピーを `notes.json.bak` に保持します。読み取れない場合は
+まずバックアップから復元し、破損ファイルは `notes.json.corrupt-<タイムスタンプ>` として残します。
+
 `MV_AI_BRIDGE_HOME` を設定すると、このディレクトリを変更できます。
 
 ### WSL + Windows
@@ -141,6 +151,8 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
 `serve` の起動バナーはブリッジのホーム、トークンファイル、セッションファイルの絶対パスを表示するので、
 どちら側が持っているかが分かります。`/health` の `rejected_last_minute` は直近 1 分の拒否を発生元の種類
 （`game`、`extension`、`web`、`none`）別に数え、トークン不一致とブラウザ拡張の探索を区別できます。
+`connection.replaced_connections` は古いゲーム接続が新しい接続に置き換えられた回数で、複数の `Game.exe` を
+同時に動かすと増え、状態も飛びます。
 
 ## ツール
 
@@ -151,6 +163,7 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
   "ok": true,
   "status": "done",
   "action": "walk",
+  "action_id": 42,
   "effect": { "steps_done": 3 },
   "interrupted_by": null,
   "reason": null,
@@ -170,13 +183,20 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
 
 `partial` と `interrupted` は正常なプレイ結果であり、ツールの失敗ではありません。
 
+`timeout` はアクションが実行されなかった証明ではありません。エラーエンベロープには `action_id` と
+`effect: {outcome: "unknown", retry_safe, hint}` が入ります。`retry_safe` が true になるのは読み取り専用
+アクションだけです。ブリッジが待つのをやめた後に届いたゲームの応答は、次の呼び出しの `warnings` に一度だけ
+表示されます（"finished after the bridge stopped waiting"）。再試行する前に `observe` で状態を読み直して
+ください。`reason: "game_not_ready"` はソケットは接続済みだが互換性のあるハンドシェイクが未完了であること
+（`effect.connection` が理由を示します）、`game_not_connected` はゲーム接続が無いことを意味します。
+
 | ツール | 動作 |
 | --- | --- |
-| `observe` | シーン、マップ、プレイヤーのタイルと向き、表示中のメッセージ、選択肢、パーティ、戦闘、近くのイベント。`state.nearby` は近い順に 5 件のイベントを `{event_id, name, x, y, distance, kind}` で返し、`kind` は `action`（決定キー）、`touch`（踏むと発動）、`transfer`（扉や階段）、`shop`、`other` のいずれかです。コマンド 0 個のベッドや施錠された扉のような装飾イベントも含まれます（それらが目的のトリガーであることが多いため）。`state.message_history` はフレームループが見た直近 3 行のセリフを保持し、呼び出しの合間にカットシーンが自動で進めた行も含みます。`objective` は `note` の key `objective` の値をそのまま返すため、長いセッションでも目標を見失いません。マップ上では `threats`（8 タイル以内の戦闘イベント。距離、移動中か、追跡するか）、`balloons`（8 タイル以内のクエストマーカー `!` / `?`。距離、balloon ID、元画像）と `world_frozen`（`FreezeWhileThinking` がマップを止めている間 true）も返します。戦闘中は入力フェーズ全体で `party_commands`、`actor_commands`、入力中のアクター、スキルタイプごとの全スキル（MP/TP コストと使用可否）、戦闘アイテム、`enemy_targets` / `actor_targets`（インデックスが `target_index` に対応）を返し、今フォーカスされているウィンドウだけに留まりません（`skill_window` / `item_window` 自体はそのコマンドを選んだ後にだけ現れます）。`battle.log` は直近の `Window_BattleLog` 行です。メニューやショップなどマップ外のシーンでは、表示中の各ウィンドウのカーソル、項目、ショップ価格を返します。セーブ画面では各スロットの `exists` / `timestamp` / `playtime` も返します。マップ上では、独自のオーバーレイウィンドウ（ワールドマップの目的地リスト、HUD メニューなど）が開いているとき `state.ui` に載ります。標準のメッセージ／マップ名ウィンドウは `state.message` / `state.map` と重複するため除外します。 |
+| `observe` | シーン、マップ、プレイヤーのタイルと向き、表示中のメッセージ、選択肢、パーティ（HP／所持金に加え、`party.inventory`：重要アイテムが先、通常アイテムが後、それぞれ合計付き。完全な一覧は `manage` の roster）、戦闘、近くのイベント。`state.nearby` は近い順に 5 件のイベントを `{event_id, name, x, y, distance, kind}` で返し、`kind` は `action`（決定キー）、`touch`（踏むと発動）、`transfer`（扉や階段）、`shop`、`other` のいずれかです。コマンド 0 個のベッドや施錠された扉のような装飾イベントも含まれます（それらが目的のトリガーであることが多いため）。`state.message_history` はフレームループが見た直近 3 行のセリフを保持し、呼び出しの合間にカットシーンが自動で進めた行も含みます。`objective` は `note` の key `objective` の値をそのまま返すため、長いセッションでも目標を見失いません。マップ上では `threats`（8 タイル以内の戦闘イベント。距離、移動中か、追跡するか）、`balloons`（8 タイル以内のクエストマーカー `!` / `?`。距離、balloon ID、元画像）と `world_frozen`（`FreezeWhileThinking` がマップを止めている間 true）も返します。戦闘中は入力フェーズ全体で `party_commands`、`actor_commands`、入力中のアクター、スキルタイプごとの全スキル（MP/TP コストと使用可否）、戦闘アイテム、`enemy_targets` / `actor_targets`（インデックスが `target_index` に対応）を返し、今フォーカスされているウィンドウだけに留まりません（`skill_window` / `item_window` 自体はそのコマンドを選んだ後にだけ現れます）。`battle.log` は直近の `Window_BattleLog` 行です。メニューやショップなどマップ外のシーンでは、表示中の各ウィンドウのカーソル、項目、ショップ価格を返します。セーブ画面では各スロットの `exists` / `timestamp` / `playtime` も返します。マップ上では、独自のオーバーレイウィンドウ（ワールドマップの目的地リスト、HUD メニューなど）が開いているとき `state.ui` に載ります。標準のメッセージ／マップ名ウィンドウは `state.message` / `state.map` と重複するため除外します。メッセージが開いているのに本文が空の場合は、本文を画像で描いています：`message.image_text` は（ゲームが使っていれば）`DTextPicture` の文字列、`message.pictures` は表示中のピクチャ名、`text_source` は `image_text` か `picture` です。 |
 | `look` | ローカルマップを文字グリッドで返します（`@` 自分、`E` イベント、`.` 通行可、`#` 通行不可）。マップ座標の `origin` とイベント一覧付き。`detail: "full"` はセルごとの通行可否に切り替えます。マップ外のセルは切り詰め、マップを超える半径は境界まで切り詰めて実際の `radius` を返します。`overview: true` でマップ全体を返します。マップ外のシーンでは `bad_scene` と現在のシーン名を返します。 |
-| `list_events` | 近くのイベントの名前、距離、トリガー種別、`interact_from`（`adjacent` / `here`）、`action_trigger`、`commands` / `empty`（有効なページにコマンドがなく、決定キーを押しても反応しない）、`hazard`（現在有効なページが直接または公共イベント経由で戦闘を開始する）、`chases`（移動ルートがプレイヤーを追う）。さらに `balloon`（頭上マーカー：1 `!`、2 `?`、0 なし。重ね画像や実行中の balloon から判定）、`page`（有効ページ番号と総数）、`note`（イベント注釈）、`page_note`（有効ページのコメント命令。note 型プラグインのタグはここに入る）を返します。後ろ二つは内容がある場合のみ。 |
+| `list_events` | 近くのイベントの名前、距離、トリガー種別、`interact_from`（`adjacent` / `here`）、`action_trigger`、`commands` / `empty`（有効なページにコマンドがなく、決定キーを押しても反応しない）、`hazard`（現在有効なページが直接または公共イベント経由で戦闘を開始する）、`chases`（移動ルートがプレイヤーを追う）。さらに `balloon`（頭上マーカー：1 `!`、2 `?`、0 なし。重ね画像や実行中の balloon から判定）、`page`（有効ページ番号と総数）、`note`（イベント注釈）、`page_note`（有効ページのコメント命令。note 型プラグインのタグはここに入る）を返します。後ろ二つは内容がある場合のみ。条件付きページがあるイベントでは `pages` に各ページの `index`、`active`、`trigger` と待機条件を列挙します：スイッチ（`switches`：`id`、`name`、`on`）、変数の下限（`variable`：`id`、`name`、`needs`、`value`）、セルフスイッチ（`self_switch`：`key`、`on`）、必要アイテム（`item`：`id`、`name`、`held`）、必要アクター（`actor`：`id`、`name`、`in_party`）。NPC や扉が反応しない理由、次のストーリー状態が何に依存するかがここで分かります。条件のないイベントは従来どおり簡潔なままです。転送イベントには `destination`（`map_id`、`x`、`y`、マップ名 `name`。有効ページを優先し、無ければ 201 を持つ別ページと `page_index`・条件）も付くので、扉の行き先を調べるために `Map###.json` を開く必要はありません。結果が空のときは `effect.diagnostic` が読み込み済みイベント数、半径制限、転送／メッセージ中かを示し、読み込み中の空結果と取り違えません。 |
 | `walk` | 指定方向へ最大 N タイル歩く。歩き切れなかった場合（壁や途中で遮られた場合）は `partial` を返します。`interrupted_by` は `message`（先に advance）、`choice`（先に select）、`event`、`transfer`、新しいシーン名を区別します。メッセージ・選択肢・イベント・転送がすでに画面を占有している場合は、歩行が黙って止まる前に `busy` と `blocked_by` を返します。`avoid_hazard: N` は戦闘イベントの N タイル圏内に踏み込む前に停止します。マップ外のシーン（メニュー、セーブなど）では `bad_scene` と現在のシーン名を返します。 |
-| `go_to` | A* で指定タイルまで経路探索して移動。`effect.path` は方向コード列（2 下、4 左、6 右、8 上）で `path_length` がその長さ、ルートのキャッシュや描画に使えます。`dry_run: true` は移動せず経路だけ返します。目標タイルは立地可能である必要があり、ベッド・カウンター・壁には移動できません。失敗時は `nearest_reachable {x, y, distance, steps}`、`blocked_by`（`wall`、`event`、`one_way_tile`、`avoidance_zone` など）、`target_passable`、`events_at_target` を返すので、やみくもに再試行せず到達可能な目標へ切り替えてください。ウィンドウが画面を占有している場合は、マップのせいにせず `busy` と `blocked_by`（`choice` / `message` / `event` / `transfer`）を返します。`avoid_hazard: N` は戦闘イベントを迂回し、次の一歩が近づく場合に停止します。マップ外のシーンでは `bad_scene` を返します。 |
+| `go_to` | A* で指定タイルまで経路探索して移動。`effect.path` は方向コード列（2 下、4 左、6 右、8 上）で `path_length` がその長さ、ルートのキャッシュや描画に使えます。`dry_run: true` は移動せず経路だけ返します。目標タイルは立地可能である必要があり、ベッド・カウンター・壁には移動できません。失敗時は `nearest_reachable {x, y, distance, steps}`、`blocked_by`（`wall`、`event`、`one_way_tile`、`avoidance_zone` など）、`target_passable`、`events_at_target` を返すので、やみくもに再試行せず到達可能な目標へ切り替えてください。到着に成功したとき、目標タイルにイベントがあれば `effect.events_at_target`（トリガー種別、ページ、`interact_from`、扉なら `destination`）と先頭の `effect.arrived_event` を返します。決定キーで起動するイベントは到着後も OK が必要、踏みつけイベントは一歩が必要なので、「着いたのに何も起きない」を説明できます。ウィンドウが画面を占有している場合は、マップのせいにせず `busy` と `blocked_by`（`choice` / `message` / `event` / `transfer`）を返します。`avoid_hazard: N` は戦闘イベントを迂回し、次の一歩が近づく場合に停止します。マップ外のシーンでは `bad_scene` を返します。 |
 | `talk_to` | 決定キーでマップイベントを開始：隣接タイルからイベントの方を向くか、`interact_from: "here"` のイベントならそのタイルまで歩いてから押します。カウンター越しの店員（`interact_from: "across_counter"`）はカウンターの前に立ち、カウンターの方を向いて押します。エラーは到達不能・対象外のページ・空のプレースホルダーページを区別します。マップ外のシーンでは `bad_scene` を返します。 |
 | `interact` | 決定キーを 1 回押す。 |
 | `advance` | 文字送りを早送りし、ページを進め、選択肢またはイベント終了で停止。まず `effect.pages` を読んでください。これは呼び出し中に現れた全ページで、イベントが 1 回で完走した場合は会話全体になることもあります（既に見た行を進めただけなら空のこともあります）。`effect.advanced_text` はフレームループが見たが `pages` から漏れた行のフォールバックで、通常は現れません。`page_delay_ms` はメッセージウィンドウのみに作用し、戦闘ログはゲーム自身のペースで流れます。戦闘中はコマンドを一切出しません。コマンド／対象ウィンドウが待機中なら `needs_command` を返し、`battleEnd` フェーズでは勝利／経験値ウィンドウを決定キーで進め（`stop: "battle_end"`）、マップへ戻った時点で終了します。 |
@@ -189,7 +209,8 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
 | `checkpoint` | メモリ上のスナップショットを保存・読込・一覧・削除。ディスクのセーブスロットには触れません。 |
 | `input` | エンジンの生ボタン（`button`、`hold_ms`）。押下時間を正確に指定できます。`effect.effective` は今回の押下で実際に変化があったか（独自ウィンドウのカーソル移動を含む）を示し、`effect.window` は押下後にカーソルを持つウィンドウと `index` / `selected` を返します。メッセージ中にメニューを押すなど作用できない場合は `reason: "input_swallowed"` と `blocked_by` を返します。セーブ画面でスロット未選択のまま `ok` を押すと `save_slot_not_chosen` を返します。 |
 | `log` | ポーリングされたイベントログ。メッセージ、選択肢、マップ移動、シーン切り替え、戦闘開始と終了、パーティと敵の状態・装備変化。セリフに要求や手がかり（「〜が必要」「〜しなければ」など）が出た場合は `hint` エントリも記録します。カットシーンがシーン切り替えなしで同じマップ内のプレイヤー位置を変えた場合は `transfer_by_event`（`from`、`to`、実行中のイベント `event_id`）を記録するので、古い座標目標が無効になったことが分かります。 |
-| `note` | ブリッジ側マシン上の永続ノート。ゲームタイトルごとに管理。key `objective` の値は毎回の `observe` に含まれます。例：`{"action":"set","key":"objective","text":"2000G を貯めてギルドに登録する。街を出る前に武器を買う"}`。 |
+| `game_data` | 読み取り専用のデータベース・進行状況参照。`kind: "switches"` / `"variables"` は既定で名前のある項目だけを返します（`id`、`name`、現在値）。`all: true` で名前のない項目も含め、`ids` で番号を指定できます。名前のあるスイッチ／変数は通常クエストやストーリー状態を表します。`kind: "items"` / `"weapons"` / `"armors"` / `"skills"` は `ids` で正確に取得（ヘルプ文付き）、または `query` で名前・説明・注釈を検索します（ヘルプ文に用途や条件が書かれていることが多い）。どちらも無い場合は id と名前だけの索引を返します。`kind: "shop"` は `event_id` とともに使い、そのショップイベントの商品を種別、id、名前、実際の価格で返します。`302` と続く `605` の商品をまとめて読み、商品を持つ全ページ（`pages[]`：`page_index`、`active`、`trigger`、`conditions`、そのページの商品）を返すので、条件付きページの品揃えも見えます。`effect.goods` は有効ページに商品があればそれ、無ければ商品を持つ最初のページです。`effect.page` と `effect.source`（`active_page` / `other_page`）が取得元を示します。スクリプトで設定され、ショップ命令に現れない商品は見えません。 |
+| `note` | ブリッジ側マシン上の永続ノート。ゲームタイトルごとに管理。書き込みはアトミックで、直前のコピーを保持します。ファイルが壊れている場合は `warnings` で報告し、破損コピーを保存したうえで可能ならバックアップから復元します。key `objective` の値は毎回の `observe` に含まれます。例：`{"action":"set","key":"objective","text":"2000G を貯めてギルドに登録する。街を出る前に武器を買う"}`。 |
 
 ### エラー理由
 
@@ -197,6 +218,9 @@ HTTP で接続する場合、トークンは `~/.mv-ai-bridge/token` にあり�
 
 | `reason` | 意味 |
 | --- | --- |
+| `game_not_connected` | ゲームプラグインのソケット接続がありません。 |
+| `game_not_ready` | ソケットは接続済みですが、ハンドシェイクが無い・未完了・非互換です。`effect.connection` が状態、プロトコルバージョン、プラグインバージョンを示します。 |
+| `timeout` | 時間内に応答なし。アクションが実行された可能性があります。`action_id`、`effect.outcome`（`unknown`）、`effect.retry_safe` を読み、再試行前に `observe` で確認してください。遅れて届いた応答は次の `warnings` に一度だけ現れます。 |
 | `bad_scene` | そのアクションはマップ（または特定のシーン）でのみ動作し、現在のシーンが異なる。`effect.scene` がシーン名を示します。 |
 | `not_on_map` | シーンはマップに見えるが、利用可能なマップデータが見つからない。通常は `Map###.json` の欠落や破損です。 |
 | `needs_command` | 戦闘中にコマンド／対象ウィンドウが待機している状態で `advance` を呼んだ。先に `battle` でコマンドを出してください。 |

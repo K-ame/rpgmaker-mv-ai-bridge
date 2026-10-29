@@ -1,6 +1,6 @@
 {
   "name": "mv-ai-bridge",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Let AI agents play RPG Maker MV games through native MCP.",
   "license": "MIT",
   "type": "module",

@@ -4,7 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { BRIDGE_DIR, BridgeCore } from '../core.js';
 import { startServer } from '../http.js';
 import { createMcpServer } from '../mcp.js';
-import { DEFAULT_HOST, DEFAULT_PORT, VERSION } from './constants.js';
+import { DEFAULT_HOST, DEFAULT_PORT, isLoopbackHost, VERSION } from './constants.js';
 import { doctor } from './doctor.js';
 import { getOrCreateToken, isProcessRunning, readSession, removeSession, TOKEN_FILE, writeSession } from './files.js';
 import { installPlugin, manualSnippet } from './install.js';
@@ -97,6 +97,14 @@ async function serve(args: ParsedArgs): Promise<void> {
   const host = typeof args.flags.host === 'string' ? args.flags.host : DEFAULT_HOST;
   const port = parsePort(args.flags.port);
   const token = typeof args.flags.token === 'string' ? args.flags.token : getOrCreateToken();
+
+  if (!isLoopbackHost(host)) {
+    console.error(
+      `[mv-ai-bridge] listening on ${host}, not loopback. The MCP endpoint and game socket ` +
+        'are reachable from your network (the token is still required). Prefer 127.0.0.1 ' +
+        'and an SSH tunnel unless you really need this.',
+    );
+  }
 
   // Stdio MCP must be explicit. Inferring it from a non-TTY stdin made
   // background and containerised runs leak JSON-RPC frames into stdout.

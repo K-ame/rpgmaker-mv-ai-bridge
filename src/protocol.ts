@@ -32,6 +32,7 @@ export interface Envelope {
   ok: boolean;
   status: Status;
   action: string;
+  action_id?: number | null;
   effect: unknown;
   interrupted_by: string | null;
   reason: string | null;
@@ -52,6 +53,7 @@ export function errorEnvelope(action: string, reason: string, state: GameState |
     ok: false,
     status: 'error',
     action,
+    action_id: null,
     effect: null,
     interrupted_by: null,
     reason,

@@ -52,7 +52,7 @@
     'use strict';
 
     var PLUGIN_NAME = 'MV_AI_Bridge';
-    var VERSION = '0.1.2';
+    var VERSION = '0.2.0';
     var PROTO = 1;
 
     var params = PluginManager.parameters(PLUGIN_NAME) || {};
@@ -328,6 +328,64 @@
         return s;
     }
 
+    // Where the running event is, as far as we can observe it. Fields are
+    // omitted when the runtime cannot answer, never guessed: a dialogue from
+    // a common event or a plugin has no map event id.
+    // Only meaningful while a map event interpreter is running; otherwise
+    // there is no event to attribute the message to, so report nothing
+    // rather than a map id that would look like event context.
+    function eventContext() {
+        var interp = safe(function () { return inMap() ? $gameMap._interpreter : null; }, null);
+        if (!interp) return null;
+        var running = safe(function () {
+            return typeof interp.isRunning === 'function' ? interp.isRunning() : true;
+        }, false);
+        if (!running) return null;
+        var out = {};
+        var mapId = safe(function () { return inMap() ? $gameMap.mapId() : null; }, null);
+        if (mapId) out.map_id = mapId;
+        var eventId = safe(function () {
+            return typeof interp._eventId === 'function' ? interp._eventId() : null;
+        }, null);
+        if (eventId) out.event_id = eventId;
+        var commonId = safe(function () { return interp._commonEventId; }, null);
+        if (commonId) out.common_event_id = commonId;
+        // Index into the event's command list. It points at the running
+        // command, and can go stale when plugins rewrite the list.
+        var index = safe(function () { return interp._index; }, null);
+        if (typeof index === 'number' && index >= 0) out.command_index = index;
+        return out;
+    }
+
+    // Some games (DTextPicture, picture menus) draw dialogue as images, so
+    // $gameMessage._texts stays empty. DTextPicture keeps the string on
+    // Game_Screen; expose that text. For plain image art only the picture
+    // names and a "picture" marker are knowable without reading pixels.
+    function dtextText() {
+        var screen = safe(function () { return $gameScreen; }, null);
+        if (!screen || typeof screen.isSettingDText !== 'function') return null;
+        if (!safe(function () { return screen.isSettingDText(); }, false)) return null;
+        var info = safe(function () { return screen.getDTextPictureInfo(); }, null);
+        if (!info) return null;
+        var text = cleanText(String(info.originalValue || info.value || '')).trim();
+        return text ? text.slice(0, 2000) : null;
+    }
+
+    function visiblePictures() {
+        var screen = safe(function () { return $gameScreen; }, null);
+        if (!screen) return [];
+        var out = [];
+        for (var id = 1; id <= 100 && out.length < 8; id++) {
+            var pic = safe(function () { return screen.picture(id); }, null);
+            if (!pic) continue;
+            var name = safe(function () { return pic.name(); }, '');
+            var opacity = safe(function () { return pic.opacity(); }, 255);
+            if (!name || opacity <= 0) continue;
+            out.push({ id: id, name: String(name) });
+        }
+        return out;
+    }
+
     function messageInfo() {
         if (!isMessageBusy()) return null;
         var texts = ($gameMessage._texts || []).slice();
@@ -342,7 +400,7 @@
         }
         var speaker = $gameMessage._speakerName || $gameMessage._speaker || null;
         var mw = messageWindow();
-        return {
+        var info = {
             active: true,
             text: cleanText(raw),
             waiting_for: waiting,
@@ -351,6 +409,21 @@
             speaker: speaker ? String(speaker) : null,
             window_hidden: !!(mw && typeof mw.isHidden === 'function' && mw.isHidden())
         };
+        if (!info.text) {
+            var imageText = dtextText();
+            if (imageText) {
+                info.image_text = imageText;
+                info.text_source = 'image_text';
+            }
+            var pictures = visiblePictures();
+            if (pictures.length) {
+                info.pictures = pictures;
+                if (!info.text_source) info.text_source = 'picture';
+            }
+        }
+        var ctx = eventContext();
+        if (ctx) info.context = ctx;
+        return info;
     }
 
     // A cutscene can open and close a message between two bridge calls, so the
@@ -360,32 +433,38 @@
     var messageHistory = [];
     var MESSAGE_HISTORY_MAX = 10;
 
-    function rememberMessage(text, speaker) {
+    function rememberMessage(text, speaker, context) {
         if (!text) return;
         var last = messageHistory[messageHistory.length - 1];
         if (last && last.text === text) return;
-        messageHistory.push({ text: String(text), speaker: speaker || null, tick: tick });
+        var entry = { text: String(text), speaker: speaker || null, tick: tick };
+        if (context) entry.context = context;
+        messageHistory.push(entry);
         if (messageHistory.length > MESSAGE_HISTORY_MAX) messageHistory.shift();
     }
 
+    function historyEntry(m) {
+        var out = { text: m.text, speaker: m.speaker };
+        if (m.context) out.context = m.context;
+        return out;
+    }
+
     function messageHistorySlice(n) {
-        return messageHistory.slice(-(n || 3)).map(function (m) {
-            return { text: m.text, speaker: m.speaker };
-        });
+        return messageHistory.slice(-(n || 3)).map(historyEntry);
     }
 
     function historySince(startTick) {
         var out = [];
         for (var i = 0; i < messageHistory.length; i++) {
             var m = messageHistory[i];
-            if (m.tick > startTick) out.push({ text: m.text, speaker: m.speaker });
+            if (m.tick > startTick) out.push(historyEntry(m));
         }
         return out;
     }
 
     function sampleMessageHistory() {
         var mi = messageInfo();
-        if (mi && mi.text) rememberMessage(mi.text, mi.speaker);
+        if (mi && mi.text) rememberMessage(mi.text, mi.speaker, mi.context || null);
     }
 
     function stateNames(battler) {
@@ -1078,6 +1157,102 @@
         };
     }
 
+    // Switch and variable names live in the database ($dataSystem), not in the
+    // runtime objects, so resolve them for the agent instead of ids only.
+    function namedFlag(id, which) {
+        var names = safe(function () { return $dataSystem[which]; }, null);
+        var name = names && names[id] ? String(names[id]).trim() : '';
+        return name || null;
+    }
+
+    function databaseName(list, id) {
+        var entry = list && list[id];
+        var name = entry && entry.name ? String(entry.name).trim() : '';
+        return name || null;
+    }
+
+    // MV page conditions (Game_Event.meetsConditions): switches, a variable
+    // minimum, a self switch, a held item or an actor in the party. Report the
+    // condition and its current state; why a page is inactive is exactly what
+    // tells the agent what the event is waiting for.
+    function pageConditionInfo(page, ev) {
+        var c = page && page.conditions;
+        if (!c) return null;
+        var out = {};
+        var switches = [];
+        if (c.switch1Valid) {
+            switches.push({
+                id: c.switch1Id,
+                name: namedFlag(c.switch1Id, 'switches'),
+                on: !!safe(function () { return $gameSwitches.value(c.switch1Id); }, false)
+            });
+        }
+        if (c.switch2Valid) {
+            switches.push({
+                id: c.switch2Id,
+                name: namedFlag(c.switch2Id, 'switches'),
+                on: !!safe(function () { return $gameSwitches.value(c.switch2Id); }, false)
+            });
+        }
+        if (switches.length) out.switches = switches;
+        if (c.variableValid) {
+            out.variable = {
+                id: c.variableId,
+                name: namedFlag(c.variableId, 'variables'),
+                needs: c.variableValue,
+                value: safe(function () { return $gameVariables.value(c.variableId); }, null)
+            };
+        }
+        if (c.selfSwitchValid) {
+            out.self_switch = {
+                key: String(c.selfSwitchCh || ''),
+                on: safe(function () {
+                    return $gameSelfSwitches.value([$gameMap.mapId(), ev.eventId(), c.selfSwitchCh]) === true;
+                }, null)
+            };
+        }
+        if (c.itemValid) {
+            var item = safe(function () { return $dataItems[c.itemId]; }, null);
+            out.item = {
+                id: c.itemId,
+                name: item ? String(item.name) : null,
+                held: safe(function () { return $gameParty.hasItem(item); }, null)
+            };
+        }
+        if (c.actorValid) {
+            var partyIds = safe(function () {
+                return $gameParty.allMembers().map(function (a) { return a.actorId(); });
+            }, []);
+            out.actor = {
+                id: c.actorId,
+                name: databaseName(safe(function () { return $dataActors; }, null), c.actorId),
+                in_party: partyIds.indexOf(c.actorId) >= 0
+            };
+        }
+        return Object.keys(out).length ? out : null;
+    }
+
+    // Only emit pages when at least one conditional page exists; unconditional
+    // events keep the old compact shape. The active page is always included so
+    // "this page is active, the others still need X" is visible in one call.
+    function eventPages(ev) {
+        var data = eventData(ev);
+        var pages = data && data.pages;
+        if (!pages || !pages.length) return null;
+        var active = ev._pageIndex;
+        var entries = [];
+        var anyCondition = false;
+        for (var i = 0; i < pages.length; i++) {
+            var cond = pageConditionInfo(pages[i], ev);
+            if (!cond && i !== active) continue;
+            if (cond) anyCondition = true;
+            var entry = { index: i, active: i === active, trigger: pages[i].trigger };
+            if (cond) entry.conditions = cond;
+            entries.push(entry);
+        }
+        return anyCondition ? entries : null;
+    }
+
     // Plugin tags live in comment commands (108, continued by 408). Exposing
     // them keeps note-driven plugins (quest markers, shops) readable.
     function pageComments(ev) {
@@ -1291,6 +1466,10 @@
             if (note) info.note = note;
             var comments = pageComments(ev);
             if (comments) info.page_note = comments;
+            var pages = eventPages(ev);
+            if (pages) info.pages = pages;
+            var dest = eventTransferDestination(ev);
+            if (dest) info.destination = dest;
             out.push(info);
         }
         out.sort(function (a, b) { return a.distance - b.distance || a.id - b.id; });
@@ -1324,6 +1503,97 @@
         return 'other';
     }
 
+    function mapDisplayNameOf(mapId) {
+        return safe(function () {
+            var info = $dataMapInfos && $dataMapInfos[mapId];
+            var name = info && (info.name || info.displayName);
+            return name ? String(name) : null;
+        }, null);
+    }
+
+    // Command 201 carries the transfer target. Designation 0 stores fixed
+    // map/x/y; designation 1 stores variable ids, so resolve those instead.
+    function transferFromList(list) {
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i];
+            if (!c || c.code !== 201) continue;
+            var p = c.parameters || [];
+            var mapId, x, y;
+            if (p[0] === 0) {
+                mapId = Number(p[1]);
+                x = Number(p[2]);
+                y = Number(p[3]);
+            } else {
+                mapId = Number(safe(function () { return $gameVariables.value(p[1]); }, NaN));
+                x = Number(safe(function () { return $gameVariables.value(p[2]); }, NaN));
+                y = Number(safe(function () { return $gameVariables.value(p[3]); }, NaN));
+            }
+            if (!mapId || isNaN(x) || isNaN(y)) continue;
+            return {
+                map_id: mapId,
+                x: x,
+                y: y,
+                name: mapDisplayNameOf(mapId),
+                from_variables: p[0] !== 0
+            };
+        }
+        return null;
+    }
+
+    // The active page is the door the player sees now; fall back to another
+    // page and say which one, since condition-gated NPCs teleport too.
+    function eventTransferDestination(ev) {
+        var data = eventData(ev);
+        var pages = data && data.pages;
+        if (!pages || !pages.length) return null;
+        var active = ev._pageIndex;
+        var order = [];
+        if (active >= 0 && pages[active]) order.push(active);
+        for (var i = 0; i < pages.length; i++) {
+            if (i !== active) order.push(i);
+        }
+        for (var o = 0; o < order.length; o++) {
+            var page = pages[order[o]];
+            var dest = transferFromList((page && page.list) || []);
+            if (!dest) continue;
+            dest.page_index = order[o];
+            dest.active = order[o] === active;
+            dest.trigger = page.trigger;
+            if (order[o] !== active) {
+                var cond = pageConditionInfo(page, ev);
+                if (cond) dest.conditions = cond;
+            }
+            return dest;
+        }
+        return null;
+    }
+
+    // Events standing on one tile. go_to can land on a door or NPC and still
+    // do nothing: player-touch needs a step, action events need OK. Report the
+    // tile's events so "arrived but nothing happened" is explainable.
+    function eventsAtTile(x, y) {
+        var out = [];
+        var events = safe(function () { return $gameMap.events(); }, []);
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (!ev || ev._erased || ev.x !== x || ev.y !== y) continue;
+            var data = eventData(ev);
+            var trigger = eventTrigger(ev);
+            var entry = {
+                event_id: ev.eventId(),
+                name: data && data.name ? String(data.name) : null,
+                trigger: trigger,
+                page: eventPageInfo(ev),
+                interact_from: safe(function () { return ev.isNormalPriority(); }, true) ? 'adjacent' : 'here'
+            };
+            var dest = eventTransferDestination(ev);
+            if (dest) entry.destination = dest;
+            if (trigger === 0) entry.hint = 'Action trigger: face this event and press OK.';
+            out.push(entry);
+        }
+        return out;
+    }
+
     // Compact "what is around me" list for state.nearby, sorted by walking
     // distance. Cheaper than eventList(radius) when the agent only needs to
     // know what to try next.
@@ -1337,14 +1607,19 @@
             var ev = events[i];
             if (!ev || ev._erased) continue;
             var data = eventData(ev);
-            out.push({
+            var entry = {
                 event_id: ev.eventId(),
                 name: data && data.name ? String(data.name) : null,
                 x: ev.x,
                 y: ev.y,
                 distance: Math.abs(ev.x - px) + Math.abs(ev.y - py),
                 kind: eventKind(ev)
-            });
+            };
+            // A door that only says "transfer" still forces the agent to open
+            // map JSON to learn where it goes. Resolve the 201 target here.
+            var dest = eventTransferDestination(ev);
+            if (dest) entry.destination = dest;
+            out.push(entry);
         }
         out.sort(function (a, b) { return a.distance - b.distance || a.event_id - b.event_id; });
         return out.slice(0, limit || 5);
@@ -1900,12 +2175,14 @@
         var signature = msg ? JSON.stringify([msg.text, msg.choices, msg.waiting_for]) : null;
         if (signature !== logWatch.message) {
             if (msg) {
-                pushLog('message', {
+                var msgEntry = {
                     text: msg.text,
                     waiting_for: msg.waiting_for,
                     choices: msg.choices,
                     speaker: msg.speaker
-                });
+                };
+                if (msg.context) msgEntry.context = msg.context;
+                pushLog('message', msgEntry);
                 addHintLog(msg.text);
             }
             logWatch.message = signature;
@@ -1913,7 +2190,9 @@
         if (msg && msg.waiting_for === 'choice') {
             var cSig = JSON.stringify(msg.choices || []);
             if (cSig !== logWatch.choices) {
-                pushLog('choice', { choices: msg.choices });
+                var choiceEntry = { choices: msg.choices };
+                if (msg.context) choiceEntry.context = msg.context;
+                pushLog('choice', choiceEntry);
                 logWatch.choices = cSig;
             }
         } else if (!msg) {
@@ -2312,7 +2591,13 @@
             return;
         }
         if (start.x === tx && start.y === ty) {
-            finishJob(job, 'done', { from: start, to: start, steps: 0, path: [] });
+            var here = safe(function () { return eventsAtTile(tx, ty); }, []);
+            var hereEffect = { from: start, to: start, steps: 0, path: [] };
+            if (here.length) {
+                hereEffect.events_at_target = here;
+                hereEffect.arrived_event = here[0];
+            }
+            finishJob(job, 'done', hereEffect);
             return;
         }
         // When avoidance is on, route around cells within `avoid` tiles of a
@@ -2382,6 +2667,11 @@
                 j.effect.steps_done = j.data.mover.stepsDone;
                 j.effect.to = playerTile();
                 if (j.effect.to.x === tx && j.effect.to.y === ty) {
+                    var at = safe(function () { return eventsAtTile(tx, ty); }, []);
+                    if (at.length) {
+                        j.effect.events_at_target = at;
+                        j.effect.arrived_event = at[0];
+                    }
                     finishJob(j, 'done', j.effect);
                 } else {
                     finishJob(j, 'partial', j.effect, { reason: 'stopped_short' });
@@ -2394,6 +2684,10 @@
     HANDLERS.talk_to = function (job) {
         var args = job.args;
         if (rejectNonMapScene(job)) return;
+        // stage names where the attempt failed (or how far it got), so a
+        // failure is actionable: locate the target, check its trigger/page,
+        // walk there, press and the event starts, then verify something ran.
+        var mapId = safe(function () { return inMap() ? $gameMap.mapId() : null; }, null);
         var ev = null;
         if (args.event_id !== undefined && args.event_id !== null) {
             ev = $gameMap.event(parseInt(args.event_id, 10));
@@ -2407,12 +2701,12 @@
             }
         }
         if (!ev) {
-            finishJob(job, 'error', null, { reason: 'no_event' });
+            finishJob(job, 'error', { stage: 'locate', map_id: mapId }, { reason: 'no_event' });
             return;
         }
         var trigger = eventTrigger(ev);
         if (trigger !== null && trigger !== 0) {
-            finishJob(job, 'error', { event_id: ev.eventId(), trigger: trigger }, {
+            finishJob(job, 'error', { event_id: ev.eventId(), trigger: trigger, stage: 'trigger', map_id: mapId }, {
                 reason: 'event_not_action_trigger'
             });
             return;
@@ -2421,7 +2715,7 @@
         // will start an empty interpreter and nothing visible happens.
         var commands = eventCommandCount(ev);
         if (commands === 0) {
-            finishJob(job, 'error', { event_id: ev.eventId(), commands: 0 }, {
+            finishJob(job, 'error', { event_id: ev.eventId(), commands: 0, stage: 'trigger', map_id: mapId }, {
                 reason: 'event_has_no_commands'
             });
             return;
@@ -2444,7 +2738,9 @@
                 var failEffect = {
                     event_id: ev.eventId(),
                     event_pos: { x: ev.x, y: ev.y },
-                    interact_from: 'here'
+                    interact_from: 'here',
+                    stage: 'move',
+                    map_id: mapId
                 };
                 var diag = safe(function () { return pathFailure(start, ev.x, ev.y, null, 0); }, null);
                 if (diag) {
@@ -2465,7 +2761,9 @@
                 var failAdj = {
                     event_id: ev.eventId(),
                     event_pos: { x: ev.x, y: ev.y },
-                    interact_from: 'adjacent'
+                    interact_from: 'adjacent',
+                    stage: 'move',
+                    map_id: mapId
                 };
                 var diag2 = safe(function () { return pathFailure(start, ev.x, ev.y, null, 0); }, null);
                 if (diag2) {
@@ -2485,6 +2783,8 @@
             interact_from: hereMode ? 'here' : (job.data.counterTile ? 'across_counter' : 'adjacent'),
             commands: commands,
             phase: 'move',
+            stage: 'move',
+            map_id: mapId,
             started: false
         };
         if (job.data.counterTile) job.effect.counter = job.data.counterTile;
@@ -2519,6 +2819,7 @@
                 if (!act(j, 0)) return;
                 if (j.data.hereMode) {
                     if ($gamePlayer.x !== target.x || $gamePlayer.y !== target.y) {
+                        j.effect.stage = 'start';
                         finishJob(j, 'partial', j.effect, { reason: 'event_moved' });
                         return;
                     }
@@ -2527,6 +2828,7 @@
                     // Two tiles away is valid only across the counter tile we
                     // planned to stand behind.
                     if (dist !== 1 && !(j.data.counterTile && dist === 2)) {
+                        j.effect.stage = 'start';
                         finishJob(j, 'partial', j.effect, { reason: 'event_moved' });
                         return;
                     }
@@ -2536,10 +2838,12 @@
                 }
                 // The page can change (or be erased) while we walk over.
                 if (target._pageIndex < 0) {
+                    j.effect.stage = 'start';
                     finishJob(j, 'error', j.effect, { reason: 'event_erased' });
                     return;
                 }
                 j.data.phase = 'press';
+                j.effect.stage = 'start';
                 j.nextAt = now() + 60;
                 return;
             }
@@ -2547,6 +2851,7 @@
                 if (now() < j.nextAt) return;
                 VInput.tap('ok', 60);
                 j.data.phase = 'wait';
+                j.effect.stage = 'verify';
                 j.data.waitStart = now();
                 j.nextAt = now() + 120;
                 return;
@@ -2559,6 +2864,7 @@
                     if (!j.data.sawRun) j.data.sawRun = now();
                     if (isMessageBusy() || choiceVisible() || now() - j.data.sawRun >= 250) {
                         j.effect.started = true;
+                        j.effect.stage = 'started';
                         j.effect.message = safe(messageInfo, null);
                         finishJob(j, 'done', j.effect);
                     }
@@ -2588,6 +2894,7 @@
                 }
                 if (now() - j.data.waitStart > 2000) {
                     j.effect.trigger = trigger;
+                    j.effect.stage = 'verify';
                     finishJob(j, 'done', j.effect, { reason: 'no_response' });
                 }
             }
@@ -2620,6 +2927,8 @@
             if (isEventRunning() || isMessageBusy() || choiceVisible()) {
                 j.effect.started = true;
                 j.effect.message = safe(messageInfo, null);
+                var ctx = eventContext();
+                if (ctx) j.effect.context = ctx;
                 finishJob(j, 'done', j.effect);
                 return;
             }
@@ -2843,6 +3152,8 @@
                 extraText.push(hist[i]);
             }
             if (extraText.length) j.effect.advanced_text = extraText;
+            var ctx = eventContext();
+            if (ctx) j.effect.context = ctx;
             finishJob(j, status, j.effect, extra);
         };
         job.handler = function (j, t) {
@@ -3713,6 +4024,192 @@
         return { items: items, weapons: weapons, armors: armors };
     }
 
+    // Key items first: they are what gates doors and quests. The full lists
+    // stay available through manage roster; observe only needs the decision
+    // relevant head of the inventory.
+    function inventoryBrief() {
+        var key = [];
+        var items = [];
+        safe(function () {
+            $gameParty.items().forEach(function (it) {
+                var entry = { id: it.id, name: it.name, count: $gameParty.numItems(it) };
+                if (it.itypeId === 2) key.push(entry);
+                else items.push(entry);
+            });
+        }, null);
+        return {
+            key_items: key.slice(0, 20),
+            key_items_total: key.length,
+            items: items.slice(0, 20),
+            items_total: items.length
+        };
+    }
+
+    // Read-only database and progress lookups. The game database is static, so
+    // ids and names come straight from $data* tables; current values come from
+    // the runtime ($gameSwitches/$gameVariables).
+    function databaseTable(kind) {
+        if (kind === 'items') return safe(function () { return $dataItems; }, null);
+        if (kind === 'weapons') return safe(function () { return $dataWeapons; }, null);
+        if (kind === 'armors') return safe(function () { return $dataArmors; }, null);
+        if (kind === 'skills') return safe(function () { return $dataSkills; }, null);
+        return null;
+    }
+
+    function describeDatabaseEntry(kind, entry) {
+        if (!entry || !entry.id || !entry.name) return null;
+        var out = { id: entry.id, name: String(entry.name) };
+        if (entry.description) out.description = cleanText(String(entry.description));
+        if (kind === 'items') {
+            out.key_item = entry.itypeId === 2;
+            if (typeof entry.price === 'number') out.price = entry.price;
+        } else if (kind === 'weapons' || kind === 'armors') {
+            if (typeof entry.price === 'number') out.price = entry.price;
+        } else if (kind === 'skills') {
+            out.mp_cost = entry.mpCost || 0;
+            out.tp_cost = entry.tpCost || 0;
+        }
+        return out;
+    }
+
+    // MV 302 stores one good per command ([type, id, priceType, price]) and
+    // appends further goods as 605 commands. Trying to treat parameters[0] as
+    // the goods array made every real shop look empty.
+    function shopGoodEntry(good) {
+        if (!Array.isArray(good) || !good.length) return null;
+        var kind = good[0] === 0 ? 'items' : good[0] === 1 ? 'weapons' : good[0] === 2 ? 'armors' : null;
+        var table = databaseTable(kind);
+        var obj = table && table[good[1]];
+        return {
+            kind: kind,
+            id: good[1],
+            name: obj ? String(obj.name) : null,
+            price: good[2] === 1
+                ? good[3]
+                : (obj && typeof obj.price === 'number' ? obj.price : null)
+        };
+    }
+
+    function pageShopGoods(list) {
+        var goods = [];
+        for (var i = 0; i < list.length; i++) {
+            var cmd = list[i];
+            if (!cmd || cmd.code !== 302) continue;
+            var first = shopGoodEntry(cmd.parameters);
+            if (first) goods.push(first);
+            while (i + 1 < list.length && list[i + 1] && list[i + 1].code === 605) {
+                i++;
+                var more = shopGoodEntry(list[i].parameters);
+                if (more) goods.push(more);
+            }
+        }
+        return goods;
+    }
+
+    // Shops can live on a condition-gated page. Report every page that has
+    // goods, with its conditions, instead of only the active one.
+    function shopGoods(eventId) {
+        if (!inMap()) throw new Error('bad_scene');
+        var ev = safe(function () { return $gameMap.event(eventId); }, null);
+        if (!ev) throw new Error('no_event');
+        var data = eventData(ev);
+        var pages = data && data.pages;
+        if (!pages || !pages.length) throw new Error('no_pages');
+        var active = ev._pageIndex;
+        var listed = [];
+        var picked = null;
+        for (var i = 0; i < pages.length; i++) {
+            var goods = pageShopGoods((pages[i] && pages[i].list) || []);
+            if (!goods.length) continue;
+            var entry = {
+                page_index: i,
+                active: i === active,
+                trigger: pages[i].trigger,
+                goods: goods
+            };
+            var cond = pageConditionInfo(pages[i], ev);
+            if (cond) entry.conditions = cond;
+            listed.push(entry);
+            if (!picked || entry.active) picked = entry;
+        }
+        return {
+            event_id: eventId,
+            name: data.name ? String(data.name) : null,
+            page: picked ? picked.page_index : null,
+            source: picked ? (picked.active ? 'active_page' : 'other_page') : null,
+            goods: picked ? picked.goods : [],
+            pages: listed
+        };
+    }
+
+    function gameData(args) {
+        var kind = String(args.kind || '');
+        if (kind === 'switches' || kind === 'variables') {
+            var names = safe(function () {
+                return kind === 'switches' ? $dataSystem.switches : $dataSystem.variables;
+            }, null);
+            var store = safe(function () {
+                return kind === 'switches' ? $gameSwitches : $gameVariables;
+            }, null);
+            if (!store) throw new Error('game_not_started');
+            var wanted = Array.isArray(args.ids) ? args.ids : null;
+            var ids = [];
+            if (wanted) {
+                ids = wanted;
+            } else if (names) {
+                for (var i = 1; i < names.length; i++) ids.push(i);
+            }
+            var entries = [];
+            for (var k = 0; k < ids.length; k++) {
+                var id = parseInt(ids[k], 10);
+                if (!id) continue;
+                var name = names && names[id] ? String(names[id]).trim() : '';
+                if (!name && !args.all) continue;
+                var value = safe(function () { return store.value(id); }, null);
+                entries.push({ id: id, name: name || null, value: value === undefined ? null : value });
+            }
+            entries.sort(function (a, b) { return a.id - b.id; });
+            var total = entries.length;
+            var max = clamp(parseInt(args.limit, 10) || 300, 1, 300);
+            if (entries.length > max) entries = entries.slice(0, max);
+            return { kind: kind, named_only: !args.all, entries: entries, total: total };
+        }
+        if (kind === 'items' || kind === 'weapons' || kind === 'armors' || kind === 'skills') {
+            var table = databaseTable(kind);
+            if (!table) throw new Error('database_not_loaded');
+            var asked = Array.isArray(args.ids) ? args.ids : null;
+            var query = args.query ? String(args.query).toLowerCase() : '';
+            var out = [];
+            var limit = clamp(parseInt(args.limit, 10) || (query ? 20 : 120), 1, 300);
+            if (asked) {
+                for (var a = 0; a < asked.length && out.length < limit; a++) {
+                    var exact = describeDatabaseEntry(kind, table[parseInt(asked[a], 10)]);
+                    if (exact) out.push(exact);
+                }
+            } else if (query) {
+                for (var b = 0; b < table.length && out.length < limit; b++) {
+                    var entry = table[b];
+                    if (!entry || !entry.name) continue;
+                    var hay = (String(entry.name) + ' ' + String(entry.description || '') + ' ' + String(entry.note || '')).toLowerCase();
+                    if (hay.indexOf(query) !== -1) out.push(describeDatabaseEntry(kind, entry));
+                }
+            } else {
+                for (var c = 0; c < table.length && out.length < limit; c++) {
+                    var brief = table[c];
+                    if (!brief || !brief.name) continue;
+                    out.push({ id: brief.id, name: String(brief.name) });
+                }
+            }
+            return { kind: kind, entries: out, limit: limit };
+        }
+        if (kind === 'shop') {
+            var eventId = parseInt(args.event_id, 10);
+            if (!eventId) throw new Error('missing_event_id');
+            return shopGoods(eventId);
+        }
+        throw new Error('invalid_kind');
+    }
+
     function partyRoster(withOptions) {
         var members = $gameParty.allMembers();
         var maxBattle = safe(function () { return $gameParty.maxBattleMembers(); }, members.length);
@@ -4139,6 +4636,12 @@
                 var radius = args.radius === undefined ? 8 : parseInt(args.radius, 10);
                 var effect = safe(briefState, null);
                 if (effect) {
+                    // Only on observe, not on the periodic state push, so the
+                    // 250 ms state frame stays small.
+                    if (effect.party) {
+                        var inventory = safe(inventoryBrief, null);
+                        if (inventory) effect.party.inventory = inventory;
+                    }
                     effect.events = eventList(isNaN(radius) ? 8 : radius);
                     if (args.detail === 'full' && inMap()) {
                         effect.items = safe(function () {
@@ -4182,13 +4685,37 @@
                     env = makeEnvelope(action, 'done', grid, { logStart: logSeq });
                 }
             } else if (action === 'list_events') {
-                var rad = args.radius === undefined ? null : parseInt(args.radius, 10);
-                env = makeEnvelope(action, 'done', { events: eventList(isNaN(rad) ? null : rad) }, { logStart: logSeq });
+                if (sceneTag() !== 'map') {
+                    env = makeEnvelope(action, 'error', { scene: sceneTag() },
+                        { reason: 'bad_scene', logStart: logSeq });
+                } else {
+                    var rad = args.radius === undefined ? null : parseInt(args.radius, 10);
+                    var listed = eventList(isNaN(rad) ? null : rad);
+                    var listEffect = { events: listed };
+                    // An empty list used to be indistinguishable from "the
+                    // map is still loading". Say what the runtime sees so a
+                    // retry is an informed decision, not a guess.
+                    if (!listed.length) {
+                        listEffect.diagnostic = safe(function () {
+                            return {
+                                map_id: $gameMap.mapId(),
+                                events_loaded: ($gameMap.events() || []).length,
+                                radius: isNaN(rad) ? null : rad,
+                                transferring: isTransferring(),
+                                message: isMessageBusy(),
+                                event_running: isEventRunning()
+                            };
+                        }, null);
+                    }
+                    env = makeEnvelope(action, 'done', listEffect, { logStart: logSeq });
+                }
             } else if (action === 'log') {
                 var since = parseInt(args.since, 10);
                 var limit = clamp(parseInt(args.limit, 10) || 50, 1, 500);
                 var items = logItems.filter(function (it) { return isNaN(since) || it.seq > since; }).slice(-limit);
                 env = makeEnvelope(action, 'done', { items: items, last_seq: logSeq }, { logStart: logSeq });
+            } else if (action === 'game_data') {
+                env = makeEnvelope(action, 'done', gameData(args), { logStart: logSeq });
             } else if (action === 'state') {
                 env = makeEnvelope(action, 'done', safe(briefState, null), { logStart: logSeq });
             } else {
@@ -4327,7 +4854,7 @@
         var args = msg.args || {};
         log('cmd', action, args);
         if (action === 'observe' || action === 'look' || action === 'list_events' ||
-            action === 'log' || action === 'state') {
+            action === 'log' || action === 'game_data' || action === 'state') {
             immediate(action, msg.id, args);
             return;
         }
