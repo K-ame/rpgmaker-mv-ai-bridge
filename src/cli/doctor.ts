@@ -29,6 +29,9 @@ export async function doctor(gameDir?: string): Promise<CheckLine[]> {
   });
 
   const dir = gameDir ? path.resolve(gameDir) : process.cwd();
+  // The plugin may be installed on a non-default port; report on that one
+  // rather than on DEFAULT_PORT, which would be misleading.
+  let configuredPort: number | null = null;
   const layout = findProject(dir);
   if (!layout) {
     lines.push({
@@ -77,6 +80,8 @@ export async function doctor(gameDir?: string): Promise<CheckLine[]> {
             text: `${PLUGIN_NAME} is not the last plugin. It still works, but loading last is the tested arrangement.`,
           });
         }
+        const rawPort = Number(entry.parameters?.Port);
+        if (Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535) configuredPort = rawPort;
         const configured = typeof entry.parameters?.Token === 'string' ? entry.parameters.Token : '';
         let onDisk = '';
         try {
@@ -120,12 +125,12 @@ export async function doctor(gameDir?: string): Promise<CheckLine[]> {
 
   const session = readSession();
   if (!session) {
-    const busy = !(await portFree(DEFAULT_HOST, DEFAULT_PORT));
+    const port = configuredPort ?? DEFAULT_PORT;
+    const label = configuredPort === null ? `Default port ${port}` : `Configured port ${port}`;
+    const busy = !(await portFree(DEFAULT_HOST, port));
     lines.push({
       level: busy ? 'warn' : 'ok',
-      text: busy
-        ? `Default port ${DEFAULT_PORT} is already in use`
-        : `Default port ${DEFAULT_PORT} is free (no bridge running)`,
+      text: busy ? `${label} is already in use` : `${label} is free (no bridge running)`,
     });
   } else if (!isProcessRunning(session.pid)) {
     lines.push({ level: 'warn', text: `Stale session file: pid ${session.pid} is not running` });

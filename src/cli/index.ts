@@ -6,7 +6,7 @@ import { startServer } from '../http.js';
 import { createMcpServer } from '../mcp.js';
 import { DEFAULT_HOST, DEFAULT_PORT, isLoopbackHost, VERSION } from './constants.js';
 import { doctor } from './doctor.js';
-import { getOrCreateToken, isProcessRunning, readSession, removeSession, TOKEN_FILE, writeSession } from './files.js';
+import { getOrCreateToken, isProcessRunning, readSession, removeSession, SESSION_FILE, TOKEN_FILE, writeSession } from './files.js';
 import { installPlugin, manualSnippet } from './install.js';
 
 interface ParsedArgs {
@@ -202,7 +202,7 @@ function install(args: ParsedArgs): void {
     log('Next steps:');
     log('  1. Run `mv-ai-bridge serve` (or configure it as an MCP server).');
     log('  2. Launch the game. The plugin retries the local socket every few seconds.');
-    log('  3. Point your MCP client at ~/.mv-ai-bridge/session.json for the token and URL.');
+    log(`  3. Point your MCP client at ${SESSION_FILE} for the token and URL.`);
   } catch (err) {
     log(`Install failed: ${(err as Error).message}`);
     log('');

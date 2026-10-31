@@ -65,12 +65,14 @@ MCP エンドポイントがネットワークから到達可能になるため 
 ```bash
 git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
 cd rpgmaker-mv-ai-bridge
-npm install
+npm ci --include=dev
 npm run build
 
 # プラグインをゲームへコピーし、plugins.js に登録する
 node dist/cli/index.js install "/path/to/MyGame"
 ```
+
+`--include=dev` は省略できません。`NODE_ENV=production` や `npm config set omit=dev` があると、素の `npm install` は TypeScript ツールチェーンを飛ばし、`npm run build` が不可解な型エラーで落ちます。
 
 `install` は `www/js/plugins/MV_AI_Bridge.js` を書き込み、`www/js/plugins.js` の末尾にエントリを追加します
 （他のすべてのプラグインの挙動を包み込むため）。現在のトークンをそのエントリの `Token` パラメータに書き込み、

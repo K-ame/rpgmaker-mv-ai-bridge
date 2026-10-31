@@ -61,12 +61,14 @@ mv-ai-bridge  ── WebSocket ws://127.0.0.1:7321/game ──  MV_AI_Bridge.js�
 ```bash
 git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
 cd rpgmaker-mv-ai-bridge
-npm install
+npm ci --include=dev
 npm run build
 
 # 把插件复制进游戏并注册到 plugins.js
 node dist/cli/index.js install "/path/to/MyGame"
 ```
+
+`--include=dev` 不是可选项：当环境里有 `NODE_ENV=production` 或 `npm config set omit=dev` 时，裸 `npm install` 会跳过 TypeScript 工具链，`npm run build` 报一堆看不懂的类型错误。
 
 `install` 会写入 `www/js/plugins/MV_AI_Bridge.js`，把条目追加到 `www/js/plugins.js` 末尾（保证插件包裹其他
 所有插件的行为），把当前 Token 写进该条目的 `Token` 参数，并留下一次性备份 `plugins.js.mv-ai-bridge.bak`。

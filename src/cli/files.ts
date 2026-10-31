@@ -107,5 +107,24 @@ export function readPlugins(pluginsJs: string): PluginEntry[] {
 
 export function writePlugins(pluginsJs: string, entries: PluginEntry[]): void {
   const body = entries.map((entry) => JSON.stringify(entry)).join(',\n');
-  fs.writeFileSync(pluginsJs, `var $plugins =\n[\n${body}\n];\n`, 'utf8');
+  // RPG Maker writes a two-line comment header above $plugins and the editor
+  // regenerates it on save. Keep whatever comment lines are already there so a
+  // re-install does not show up as an unrelated diff in the game's repository.
+  let header = '';
+  try {
+    const source = fs.readFileSync(pluginsJs, 'utf8');
+    const marker = source.indexOf('var $plugins');
+    if (marker > 0) {
+      const kept = source
+        .slice(0, marker)
+        .split('\n')
+        .filter((line) => line.trim() === '' || line.trim().startsWith('//'))
+        .join('\n')
+        .replace(/\n+$/, '');
+      if (kept.trim()) header = kept + '\n';
+    }
+  } catch {
+    /* new file, nothing to keep */
+  }
+  fs.writeFileSync(pluginsJs, `${header}var $plugins =\n[\n${body}\n];\n`, 'utf8');
 }

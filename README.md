@@ -66,12 +66,14 @@ Or build from source:
 ```bash
 git clone https://github.com/K-ame/rpgmaker-mv-ai-bridge.git
 cd rpgmaker-mv-ai-bridge
-npm install
+npm ci --include=dev
 npm run build
 
 # copy the plugin into the game and register it in plugins.js
 node dist/cli/index.js install "/path/to/MyGame"
 ```
+
+`--include=dev` is not optional: with `NODE_ENV=production` or `npm config set omit=dev`, a plain `npm install` skips the TypeScript toolchain and `npm run build` fails with confusing type errors.
 
 `install` writes `www/js/plugins/MV_AI_Bridge.js`, appends the entry at the end of `www/js/plugins.js` (so the plugin
 wraps every other plugin's behaviour), writes the current token into the entry's `Token` parameter, and keeps a
